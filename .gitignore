@@ -1,0 +1,7 @@
+.streamlit/secrets.toml
+__pycache__/
+.venv/
+.DS_Store
+static/
+.idea/
+.streamlit/theatres-version

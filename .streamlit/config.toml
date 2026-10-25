@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+primaryColor = "#EB6834"
+textColor = "#0B1630"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+# Theatre outlines are served as a file so the browser fetches them once
+enableStaticServing = true
