@@ -18,3 +18,42 @@ Ras Lanuf oil terminal,Ras Lanuf,LBY,30.500,18.550,critical_industrial,80000000,
 Khartoum office building,Khartoum,SDN,15.590,32.530,commercial,20000000,USD,10000,8
 Damascus hotel,Damascus,SYR,33.510,36.290,commercial,25000000,USD,15000,10
 Latakia port terminal,Latakia,SYR,35.520,35.780,transport_hub,30000000,USD,30000,2
+Sanaa office building,Sanaa,YEM,15.369,44.191,commercial,18000000,USD,10000,8
+Aden port logistics centre,Aden,YEM,12.785,45.018,transport_hub,35000000,USD,35000,2
+Al Hudaydah warehouse,Al Hudaydah,YEM,14.798,42.954,commercial,12000000,USD,18000,1
+Algiers office tower,Algiers,DZA,36.753,3.058,commercial,45000000,USD,22000,18
+Oran logistics centre,Oran,DZA,35.698,-0.634,transport_hub,30000000,USD,40000,2
+Skikda industrial plant,Skikda,DZA,36.879,6.907,critical_industrial,85000000,USD,75000,3
+Istanbul office tower,Istanbul,TUR,41.008,28.978,commercial,95000000,USD,40000,28
+Ankara business centre,Ankara,TUR,39.933,32.86,commercial,50000000,USD,24000,16
+Izmir port logistics centre,Izmir,TUR,38.423,27.143,transport_hub,55000000,USD,50000,2
+Mumbai office tower,Mumbai,IND,19.076,72.878,commercial,110000000,USD,48000,32
+Chennai industrial plant,Chennai,IND,13.083,80.271,critical_industrial,75000000,USD,65000,3
+Karachi logistics centre,Karachi,PAK,24.861,67.01,transport_hub,40000000,USD,45000,2
+Dhaka commercial centre,Dhaka,BGD,23.81,90.413,commercial,35000000,USD,22000,14
+Singapore office tower,Singapore,SGP,1.352,103.82,commercial,140000000,USD,45000,35
+Jakarta distribution centre,Jakarta,IDN,-6.208,106.846,transport_hub,45000000,USD,55000,2
+Ho Chi Minh City industrial plant,Ho Chi Minh City,VNM,10.823,106.63,critical_industrial,60000000,USD,60000,3
+Manila office building,Manila,PHL,14.6,120.984,commercial,55000000,USD,28000,20
+Seoul office tower,Seoul,KOR,37.566,126.978,commercial,120000000,USD,42000,30
+Tokyo business centre,Tokyo,JPN,35.676,139.65,commercial,160000000,USD,50000,35
+Shanghai logistics centre,Shanghai,CHN,31.23,121.474,transport_hub,90000000,USD,80000,3
+Lagos office building,Lagos,NGA,6.524,3.379,commercial,45000000,USD,25000,18
+Accra distribution centre,Accra,GHA,5.603,-0.187,transport_hub,25000000,USD,35000,2
+Dakar business centre,Dakar,SEN,14.717,-17.467,commercial,22000000,USD,14000,10
+Nairobi office tower,Nairobi,KEN,-1.292,36.822,commercial,50000000,USD,26000,20
+Addis Ababa logistics centre,Addis Ababa,ETH,8.981,38.758,transport_hub,30000000,USD,40000,2
+Johannesburg industrial plant,Johannesburg,ZAF,-26.204,28.047,critical_industrial,70000000,USD,65000,3
+New York office tower,New York,USA,40.713,-74.006,commercial,220000000,USD,65000,45
+Houston industrial plant,Houston,USA,29.76,-95.37,critical_industrial,150000000,USD,100000,3
+Los Angeles logistics centre,Los Angeles,USA,34.052,-118.244,transport_hub,100000000,USD,90000,2
+Toronto business centre,Toronto,CAN,43.653,-79.383,commercial,120000000,USD,42000,30
+Mexico City office tower,Mexico City,MEX,19.433,-99.133,commercial,75000000,USD,35000,25
+London office tower,London,GBR,51.507,-0.128,commercial,180000000,USD,50000,35
+Paris business centre,Paris,FRA,48.857,2.352,commercial,130000000,USD,42000,25
+Hamburg port logistics centre,Hamburg,DEU,53.551,9.994,transport_hub,90000000,USD,75000,2
+Warsaw office building,Warsaw,POL,52.23,21.012,commercial,65000000,USD,30000,22
+Madrid commercial centre,Madrid,ESP,40.417,-3.704,commercial,70000000,USD,32000,18
+Dublin office building,Dublin,IRL,53.35,-6.26,commercial,75000000,USD,25000,12
+Sao Paulo office tower,Sao Paulo,BRA,-23.551,-46.633,commercial,95000000,USD,40000,28
+Sydney business centre,Sydney,AUS,-33.869,151.209,commercial,130000000,USD,42000,30

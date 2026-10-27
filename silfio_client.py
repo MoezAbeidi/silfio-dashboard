@@ -6,7 +6,7 @@ import io
 import math
 from datetime import date, timedelta
 
-import pandas as pd
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
@@ -14,51 +14,56 @@ import requests
 TIMEOUT_S = 600
 
 
-def load_portfolio(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    if "deductible_pct" not in df:
-        df["deductible_pct"] = 0.01
+def load_portfolio(path: str) -> pl.DataFrame:
+    df = pl.read_csv(path)
+    if "deductible_pct" not in df.columns:
+        df = df.with_columns(pl.lit(0.01).alias("deductible_pct"))
     return df
 
 
 def build_payload(
-    portfolio: pd.DataFrame,
-    site_overrides: pd.DataFrame | None = None,
-    country_overrides: pd.DataFrame | None = None,
-    theatre_shares: dict[str, dict[int, float]] | None = None,
+    portfolio: pl.DataFrame,
+    site_overrides: pl.DataFrame | None = None,
+    country_overrides: pl.DataFrame | None = None,
 ) -> dict:
     start = date.today()
-    sites = site_overrides.set_index("property_name_or_address") if site_overrides is not None else None
+    sites = (
+        {r["property_name_or_address"]: r for r in site_overrides.iter_rows(named=True)}
+        if site_overrides is not None
+        else {}
+    )
     inventory, policies = [], []
-    for i, r in portfolio.reset_index(drop=True).iterrows():
+    for i, r in enumerate(portfolio.iter_rows(named=True)):
         policy_id = f"P-{i + 1}"
         item = {
-            "property_name_or_address": r.property_name_or_address,
+            "property_name_or_address": r["property_name_or_address"],
             "policy_ids": [policy_id],
-            "value": float(r.value),
-            "currency": r.currency,
-            "latitude": float(r.latitude),
-            "longitude": float(r.longitude),
-            "iso3": r.iso3,
-            "property_sqm": float(r.property_sqm),
+            "value": float(r["value"]),
+            "currency": r["currency"],
+            "latitude": float(r["latitude"]),
+            "longitude": float(r["longitude"]),
+            "iso3": r["iso3"],
+            "property_sqm": float(r["property_sqm"]),
             "building_floors": _int_or_none(r.get("building_floors")),
-            "occupancy": r.occupancy,
+            "occupancy": r["occupancy"],
         }
-        if sites is not None and r.property_name_or_address in sites.index:
-            o = sites.loc[r.property_name_or_address]
-            item["location_factor_override"] = _float_or_none(o.location_factor)
-            item["occupancy_factor_override"] = _float_or_none(o.occupancy_factor)
+        if r["property_name_or_address"] in sites:
+            o = sites[r["property_name_or_address"]]
+            item["location_factor_override"] = _float_or_none(o["location_factor"])
+            item["occupancy_factor_override"] = _float_or_none(o["occupancy_factor"])
+            probability = _float_or_none(o["standalone_probability_pct"])
+            item["subthreshold_probability_override"] = None if probability is None else probability / 100
         inventory.append(item)
-        ded = float(r.deductible_pct)
+        ded = float(r["deductible_pct"])
         policies.append(
             {
                 "policy_id": policy_id,
                 "inception_date": start.isoformat(),
                 "expiry_date": (start + timedelta(days=365)).isoformat(),
-                "currency": r.currency,
+                "currency": r["currency"],
                 "insurance": {
-                    "occurrence_attachment": ded * float(r.value),
-                    "occurrence_limit": (1 - ded) * float(r.value),
+                    "occurrence_attachment": ded * float(r["value"]),
+                    "occurrence_limit": (1 - ded) * float(r["value"]),
                     "deductible_type": "excess",
                     "participation_pct": 1.0,
                 },
@@ -67,22 +72,15 @@ def build_payload(
     payload = {"inventory": inventory, "insurance_policies": policies}
     if country_overrides is not None:
         event, hazard = {}, {}
-        for _, c in country_overrides.iterrows():
-            if _float_or_none(c.onset_pct) is not None:
-                event[c.iso3] = {"annual_prob": c.onset_pct / 100, "conflict_type": c.conflict_type}
-            if _float_or_none(c.damage_pct) is not None:
-                hazard[c.iso3] = {"damage": c.damage_pct / 100}
+        for c in country_overrides.iter_rows(named=True):
+            if _float_or_none(c["onset_pct"]) is not None:
+                event[c["iso3"]] = {"annual_prob": c["onset_pct"] / 100}
+            if _float_or_none(c["damage_pct"]) is not None:
+                hazard[c["iso3"]] = {"damage": c["damage_pct"] / 100}
         if event:
             payload["event_scenario"] = event
         if hazard:
             payload["hazard_scenario"] = hazard
-    theatres = {
-        iso3: [{"theatre_id": int(t), "share": s} for t, s in shares.items()]
-        for iso3, shares in (theatre_shares or {}).items()
-        if shares
-    }
-    if theatres:
-        payload["theatre_scenario"] = theatres
     return payload
 
 
@@ -90,15 +88,21 @@ def is_scenario(payload: dict) -> bool:
     return bool(
         payload.get("event_scenario")
         or payload.get("hazard_scenario")
-        or payload.get("theatre_scenario")
         or any(
-            i.get("location_factor_override") is not None or i.get("occupancy_factor_override") is not None
+            any(
+                i.get(key) is not None
+                for key in (
+                    "location_factor_override",
+                    "occupancy_factor_override",
+                    "subthreshold_probability_override",
+                )
+            )
             for i in payload["inventory"]
         )
     )
 
 
-def run(api_url: str, api_key: str, payload: dict) -> dict[str, pd.DataFrame]:
+def run(api_url: str, api_key: str, payload: dict) -> dict[str, pl.DataFrame]:
     endpoint = "/scenario" if is_scenario(payload) else "/run"
     resp = requests.post(
         api_url.rstrip("/") + endpoint,
@@ -109,7 +113,7 @@ def run(api_url: str, api_key: str, payload: dict) -> dict[str, pd.DataFrame]:
     )
     if not resp.ok:
         raise RuntimeError(f"{endpoint} returned {resp.status_code}: {resp.text[:500]}")
-    return {name: pd.DataFrame(rows) for name, rows in resp.json().items()}
+    return {name: pl.DataFrame(rows, infer_schema_length=None) for name, rows in resp.json().items()}
 
 
 def theatres_version(api_url: str, api_key: str) -> str:
@@ -137,27 +141,53 @@ def theatres(api_url: str, api_key: str, countries) -> pa.Table:
     return pq.read_table(io.BytesIO(resp.content))
 
 
-def site_results(portfolio: pd.DataFrame, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    inv = tables["inventory_summary"]
-    by_site = inv.groupby("property_name_or_address", as_index=False).agg(
-        expected_loss=("expected_ground_up_loss", "sum"), hit_frequency=("hit_frequency", "max")
-    )
-    out = portfolio.merge(by_site, on="property_name_or_address", how="left").fillna(
-        {"expected_loss": 0.0, "hit_frequency": 0.0}
-    )
-    out["bps"] = out.expected_loss / out.value * 1e4
-    return out
+def display_theatres(
+    theatres: pl.DataFrame,
+    scenario_shares: pl.DataFrame | None = None,
+    ongoing: bool = False,
+    subthreshold: bool = False,
+) -> pl.DataFrame:
+    out = theatres.with_columns(pl.lit(None, dtype=pl.Float64).alias("scenario_share"))
+    if subthreshold:
+        return out.with_columns(pl.col("subthreshold_share").alias("shown"))
+    if scenario_shares is not None and not scenario_shares.is_empty():
+        out = out.drop("scenario_share").join(
+            scenario_shares.select("iso3", "theatre_id", pl.col("share").alias("scenario_share")),
+            on=["iso3", "theatre_id"],
+            how="left",
+            validate="m:1",
+            maintain_order="left",
+        )
+    model = pl.coalesce(pl.col("ongoing_share").fill_nan(None), pl.col("share")) if ongoing else pl.col("share")
+    return out.with_columns(pl.coalesce(pl.col("scenario_share").fill_nan(None), model).alias("shown"))
 
 
-def headline(tables: dict[str, pd.DataFrame]) -> dict:
-    ps = tables["portfolio_summary"].set_index("layer")
-    gu = ps.loc["ground_up"]
-    net = ps.loc["insurer"] if "insurer" in ps.index else gu
+def site_results(portfolio: pl.DataFrame, tables: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    by_site = (
+        tables["inventory_summary"]
+        .group_by("property_name_or_address")
+        .agg(
+            pl.col("expected_ground_up_loss").sum().alias("expected_loss"),
+            pl.col("hit_frequency").max(),
+        )
+    )
+    return (
+        portfolio.join(by_site, on="property_name_or_address", how="left", maintain_order="left")
+        .with_columns(pl.col("expected_loss", "hit_frequency").fill_nan(None).fill_null(0.0))
+        .with_columns((pl.col("expected_loss") / pl.col("value") * 1e4).alias("bps"))
+    )
+
+
+def headline(tables: dict[str, pl.DataFrame]) -> dict:
+    ps = tables["portfolio_summary"]
+    gu = ps.filter(pl.col("layer") == "ground_up").row(0, named=True)
+    insurer = ps.filter(pl.col("layer") == "insurer")
+    net = insurer.row(0, named=True) if not insurer.is_empty() else gu
     return {
-        "expected_loss": gu.expected_loss,
-        "var_99": gu.var_99,
-        "tvar_99": gu.tvar_99,
-        "net_expected_loss": net.expected_loss,
+        "expected_loss": gu["expected_loss"],
+        "var_99": gu["var_99"],
+        "tvar_99": gu["tvar_99"],
+        "net_expected_loss": net["expected_loss"],
     }
 
 

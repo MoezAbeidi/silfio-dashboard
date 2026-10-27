@@ -1,4 +1,4 @@
 streamlit>=1.50
-pandas>=2.2
+polars>=1.24,<2
 pyarrow>=15
 requests>=2.32

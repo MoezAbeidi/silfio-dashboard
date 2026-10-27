@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import pydeck as pdk
 import streamlit as st
 
@@ -17,7 +17,6 @@ HERE = Path(__file__).resolve().parent
 PORTFOLIO_CSV = HERE / "portfolio.csv"
 STATIC = HERE / "static"
 LAST_VERSION = HERE / ".streamlit" / "theatres-version"
-CONFLICT_TYPES = ["interstate", "internationalised_internal", "internal"]
 PALETTE = np.array(
     [[11, 61, 145], [0, 100, 200], [156, 195, 238], [246, 205, 184], [235, 104, 52], [165, 48, 12]], dtype=float
 )
@@ -51,12 +50,12 @@ if not API_KEY:
 # Results persist on disk, so a restart or a second browser tab does not rerun the
 # model. The payload carries today's date, so each day starts a fresh run.
 @st.cache_data(show_spinner="Running Silfio…", persist="disk")
-def run_cached(payload_json: str) -> dict[str, pd.DataFrame]:
+def run_cached(payload_json: str, response_version: int = 3) -> dict[str, pl.DataFrame]:
     return sc.run(API_URL, API_KEY, json.loads(payload_json))
 
 
 @st.cache_data
-def load_portfolio(path: str, mtime: float) -> pd.DataFrame:
+def load_portfolio(path: str, mtime: float) -> pl.DataFrame:
     return sc.load_portfolio(path)
 
 
@@ -78,54 +77,59 @@ def theatres_version() -> str:
 # Saved on disk per version, so a restart or a new day downloads nothing unless the
 # API's theatre data has actually changed (a deploy, or the daily ongoing shares).
 @st.cache_data(show_spinner="Downloading theatres…", persist="disk", max_entries=8)
-def fetch_theatres(countries: tuple[str, ...], version: str) -> tuple[list, pd.DataFrame]:
+def fetch_theatres(countries: tuple[str, ...], version: str) -> tuple[list, pl.DataFrame]:
     """Outlines and shares from the API for one theatre version."""
     table = sc.theatres(API_URL, API_KEY, countries)
     rings = table.column("polygon").to_pylist()
     ongoing = table.column("ongoing").to_pylist()
-    t = table.drop(["polygon", "ongoing"]).to_pandas()
-    t["ongoing_share"] = [np.mean([o["share"] for o in o_list]) if o_list else np.nan for o_list in ongoing]
-    t["ongoing_text"] = [
-        "; ".join(f"ongoing conflict {o['conflict_id']}: {o['share']:.1%}" for o in o_list) if o_list else ""
-        for o_list in ongoing
-    ]
+    t = pl.from_arrow(table.drop(["polygon", "ongoing"]))
+    t = t.with_columns(
+        pl.Series(
+            "ongoing_share",
+            [np.mean([o["share"] for o in o_list]) if o_list else None for o_list in ongoing],
+            dtype=pl.Float64,
+        )
+    )
+    t = t.with_columns(
+        pl.Series(
+            "ongoing_text",
+            [
+                "; ".join(f"ongoing conflict {o['conflict_id']}: {o['share']:.1%}" for o in o_list) if o_list else ""
+                for o_list in ongoing
+            ],
+        )
+    )
     return rings, t
-
-
-@st.cache_resource(max_entries=16)
-def theatre_objects(
-    countries: tuple[str, ...], version: str, ongoing: bool, scenario: tuple
-) -> tuple[list[dict], pd.DataFrame]:
-    """One map object per theatre outline, shaded by a new conflict's split or, where a
-    conflict is under way, the split the model uses if it continues."""
-    rings, t = fetch_theatres(countries, version)
-    shown = (t.ongoing_share.fillna(t.share) if ongoing else t.share).to_numpy(copy=True)
-    pinned = {(iso3, tid): s for iso3, tid, s in scenario}
-    for iso3 in {iso3 for iso3, _, _ in scenario}:
-        rows = (t.iso3 == iso3).to_numpy()
-        shown[rows] = scenario_shares(t[rows], pinned)
-    t = t.assign(shown=shown)
-    label = [
-        f"{iso3} theatre {tid}: {p:.1%} of a new conflict's fighting"
-        + (f"; {o}" if o else "")
-        + (f"; scenario {s:.1%}" if iso3 in {i for i, _, _ in scenario} else "")
-        for iso3, tid, p, o, s in zip(t.iso3, t.theatre_id, t.share, t.ongoing_text, t.shown)
-    ]
-    colour = ramp(t.shown.to_numpy(), SHARE_RANGE, PALETTE[3:], alpha=150)
-    polygons = [
-        {"polygon": r, "colour": c, "label": name, "iso3": iso3, "theatre_id": int(tid), "share": float(p)}
-        for r, c, name, iso3, tid, p in zip(rings, colour, label, t.iso3, t.theatre_id, t.share)
-    ]
-    return polygons, t.assign(label=label)
 
 
 @st.cache_data(max_entries=16)
 def theatre_layers(
-    countries: tuple[str, ...], version: str, ongoing: bool, label_min: float, scenario: tuple
-) -> tuple[str, list[dict], pd.DataFrame]:
-    """Polygon file URL, share labels and centres. The outlines run to megabytes for a
-    global book, so they go to a static file the browser fetches once."""
-    polygons, t = theatre_objects(countries, version, ongoing, scenario)
+    countries: tuple[str, ...],
+    version: str,
+    ongoing: bool,
+    label_min: float,
+    scenario_shares: pl.DataFrame | None = None,
+    subthreshold: bool = False,
+) -> tuple[str, list[dict], pl.DataFrame]:
+    """Polygon file URL, share labels and centres, shaded by a new conflict's split or,
+    where a conflict is under way, the split the model uses if it continues.
+
+    The outlines run to megabytes for a global book, so they go to a static file the
+    browser fetches once; reruns then send only its URL."""
+    rings, t = fetch_theatres(countries, version)
+    t = sc.display_theatres(t, scenario_shares, ongoing, subthreshold)
+    label = [
+        f"{iso3} theatre: {shown:.1%} of sub-threshold incidents"
+        if subthreshold
+        else (
+            f"{iso3} theatre: {s:.1%} of fighting in this scenario"
+            if sc._float_or_none(s) is not None
+            else f"{iso3} theatre: {p:.1%} of a new conflict's fighting" + (f"; {o}" if o else "")
+        )
+        for iso3, p, o, s, shown in zip(t["iso3"], t["share"], t["ongoing_text"], t["scenario_share"], t["shown"])
+    ]
+    colour = ramp(t["shown"].to_numpy(), SHARE_RANGE, PALETTE[3:], alpha=150)
+    polygons = [{"polygon": r, "colour": c, "label": name} for r, c, name in zip(rings, colour, label)]
     body = json.dumps(polygons, separators=(",", ":"))
     name = f"theatres-{hashlib.sha1(body.encode()).hexdigest()[:16]}.json"
     STATIC.mkdir(exist_ok=True)
@@ -134,26 +138,16 @@ def theatre_layers(
             old.unlink(missing_ok=True)
     if not (STATIC / name).exists():
         (STATIC / name).write_text(body)
-    first = ~t.duplicated(["iso3", "theatre_id"]).to_numpy()
-    centres = t[first][["iso3", "theatre_id", "shown", "latitude", "longitude"]].reset_index(drop=True)
-    big = first & (t.shown.to_numpy() >= label_min)
+    first = t.select(pl.struct("iso3", "theatre_id").is_first_distinct()).to_series().to_numpy()
+    centres = t.filter(first).select("iso3", "theatre_id", "shown", "latitude", "longitude")
+    big = first & (t["shown"].to_numpy() >= label_min)
     labels = [
-        {"position": [lon, lat], "text": f"{p:.0%}" if p >= 0.1 else f"{p:.1%}", "label": name}
-        for p, lat, lon, name in zip(t.shown[big], t.latitude[big], t.longitude[big], t.label[big])
+        {"position": [lon, lat], "text": f"{p:.0%}" if p >= 0.1 else f"{p:.1%}", "label": text}
+        for p, lat, lon, text in zip(
+            t["shown"].filter(big), t["latitude"].filter(big), t["longitude"].filter(big), np.array(label)[big]
+        )
     ]
     return f"app/static/{name}", labels, centres
-
-
-def scenario_shares(country: pd.DataFrame, pinned: dict) -> np.ndarray:
-    """A country's shares with the pinned theatres set and the rest scaled to fill 100%."""
-    keys = list(zip(country.iso3, country.theatre_id))
-    fixed = np.array([k in pinned for k in keys])
-    set_shares = [pinned[k] for k in keys if k in pinned]
-    share = country.share.to_numpy()
-    rest = share[~fixed].sum()
-    out = share * (1 - sum(set_shares)) / rest if rest else np.zeros_like(share)
-    out[fixed] = set_shares
-    return out
 
 
 def ramp(values: np.ndarray, bounds: tuple[float, float], palette: np.ndarray, alpha: int) -> list[list[int]]:
@@ -165,24 +159,28 @@ def ramp(values: np.ndarray, bounds: tuple[float, float], palette: np.ndarray, a
     return np.column_stack([rgb.round(), np.full(len(values), alpha)]).astype(int).tolist()
 
 
-def site_theatre_share(sites: pd.DataFrame, centres: pd.DataFrame) -> np.ndarray:
+def site_theatre_share(sites: pl.DataFrame, centres: pl.DataFrame) -> np.ndarray:
     """Share of the country's fighting in each site's theatre: the nearest centre in
     its own country, as the model assigns it."""
     share = np.full(len(sites), np.nan)
-    for iso3, idx in sites.groupby("iso3").indices.items():
-        c = centres[centres.iso3 == iso3]
-        if c.empty:
+    for iso3 in sites["iso3"].unique():
+        idx = np.flatnonzero((sites["iso3"] == iso3).to_numpy())
+        c = centres.filter(pl.col("iso3") == iso3)
+        if c.is_empty():
             continue
-        lat1, lon1 = np.radians(sites.latitude.to_numpy()[idx, None]), np.radians(sites.longitude.to_numpy()[idx, None])
-        lat2, lon2 = np.radians(c.latitude.to_numpy()[None, :]), np.radians(c.longitude.to_numpy()[None, :])
+        lat1, lon1 = (
+            np.radians(sites["latitude"].to_numpy()[idx, None]),
+            np.radians(sites["longitude"].to_numpy()[idx, None]),
+        )
+        lat2, lon2 = np.radians(c["latitude"].to_numpy()[None, :]), np.radians(c["longitude"].to_numpy()[None, :])
         h = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
-        share[idx] = c.shown.to_numpy()[h.argmin(axis=1)]
+        share[idx] = c["shown"].to_numpy()[h.argmin(axis=1)]
     return share
 
 
-def fit_view(points: pd.DataFrame) -> pdk.ViewState:
+def fit_view(points: pl.DataFrame) -> pdk.ViewState:
     """Frame every point, from one city up to a global book."""
-    view = pdk.data_utils.compute_view(points[["longitude", "latitude"]].values.tolist(), view_proportion=1)
+    view = pdk.data_utils.compute_view(points.select("longitude", "latitude").rows(), view_proportion=1)
     view.zoom = float(min(max(view.zoom - 0.3, 1.0), 6.0))
     return view
 
@@ -193,45 +191,35 @@ def money(x: float) -> str:
     return f"${x / 1e6:,.2f}m" if abs(x) < 1e7 else f"${x / 1e6:,.1f}m"
 
 
-def edit_theatre_panel(picked: dict | None) -> None:
-    shares = st.session_state.assumptions["theatres"]
-    if picked:
-        iso3, tid = picked["iso3"], int(picked["theatre_id"])
-        current = shares.get(iso3, {}).get(tid, picked["share"])
-        info, value, set_col, remove_col = st.columns([3, 2, 1, 1], vertical_alignment="bottom")
-        info.markdown(f"**{iso3}** theatre {tid} · model share {picked['share']:.1%}")
-        pct = value.number_input("Scenario share %", 0.0, 100.0, round(current * 100, 2), step=1.0)
-        if set_col.button("Set", width="stretch"):
-            shares.setdefault(iso3, {})[tid] = pct / 100
-            st.rerun()
-        if tid in shares.get(iso3, {}) and remove_col.button("Remove", width="stretch"):
-            del shares[iso3][tid]
-            if not shares[iso3]:
-                del shares[iso3]
-            st.rerun()
-    else:
-        st.caption("Click a theatre on the map to set its share of the country's fighting.")
-    over = [iso3 for iso3, s in shares.items() if sum(s.values()) > 1 + 1e-9]
-    if over:
-        st.error(f"Theatre shares add up to more than 100% in {', '.join(over)}.")
-    if shares and st.button("Run scenario", type="primary", disabled=bool(over)):
-        st.session_state.run_requested = True
-        theatres_version.clear()
-        st.rerun()
-
-
 portfolio = load_portfolio(str(PORTFOLIO_CSV), PORTFOLIO_CSV.stat().st_mtime)
-countries = tuple(sorted(portfolio.iso3.unique()))
+countries = tuple(sorted(portfolio["iso3"].unique()))
 
-by_country = portfolio.groupby("iso3").agg(sites=("value", "size"), value=("value", "sum")).reset_index()
+by_country = portfolio.group_by("iso3").agg(pl.len().alias("sites"), pl.col("value").sum()).sort("iso3")
+# Preserve assumptions and results from browser sessions opened before the migration.
+for state_key in ("assumptions", "scenario_results"):
+    if state_key in st.session_state:
+        st.session_state[state_key] = {
+            name: frame if isinstance(frame, pl.DataFrame) else pl.from_dataframe(frame)
+            for name, frame in st.session_state[state_key].items()
+        }
 if "assumptions" not in st.session_state:
     st.session_state.assumptions = {
-        "countries": by_country.assign(onset_pct=np.nan, conflict_type="interstate", damage_pct=np.nan),
-        "sites": portfolio[["property_name_or_address", "iso3", "occupancy", "value"]].assign(
-            location_factor=np.nan, occupancy_factor=np.nan
+        "countries": by_country.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("onset_pct"),
+            pl.lit(None, dtype=pl.Float64).alias("damage_pct"),
         ),
-        "theatres": {},
+        "sites": portfolio.select("property_name_or_address", "iso3", "occupancy", "value").with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("location_factor"),
+            pl.lit(None, dtype=pl.Float64).alias("occupancy_factor"),
+            pl.lit(None, dtype=pl.Float64).alias("standalone_probability_pct"),
+        ),
     }
+
+# Remove the retired selector from assumptions saved by an older browser session.
+if "conflict_type" in st.session_state.assumptions["countries"].columns:
+    st.session_state.assumptions["countries"] = st.session_state.assumptions["countries"].drop("conflict_type")
+    st.session_state.pop("countries_editor", None)
+    st.session_state.pop("scenario_results", None)
 
 
 @st.dialog("Scenario assumptions", width="large")
@@ -241,7 +229,7 @@ def edit_assumptions() -> None:
     tab_countries, tab_sites = st.tabs(["Countries", "Sites"])
     with tab_countries:
         countries_edit = st.data_editor(
-            current["countries"],
+            current["countries"].to_arrow(),
             hide_index=True,
             width="stretch",
             height=min(38 + 35 * len(current["countries"]), 520),
@@ -253,9 +241,6 @@ def edit_assumptions() -> None:
                 "onset_pct": st.column_config.NumberColumn(
                     "Onset %", min_value=0, max_value=100, help="Annual probability a conflict starts"
                 ),
-                "conflict_type": st.column_config.SelectboxColumn(
-                    "Conflict type", options=CONFLICT_TYPES, help="Used only when Onset % is set"
-                ),
                 "damage_pct": st.column_config.NumberColumn(
                     "Damage %", min_value=0, max_value=100, help="Share of buildings damaged in a conflict"
                 ),
@@ -263,8 +248,20 @@ def edit_assumptions() -> None:
             key="countries_editor",
         )
     with tab_sites:
+        st.caption(
+            "Optional annual probability of a damaging targeted strike or other sub-threshold incident. No full conflict is required. This replaces the site's modelled sub-threshold risk; blank keeps the model. Damage severity stays modelled."
+        )
         sites_edit = st.data_editor(
-            current["sites"],
+            current["sites"].to_arrow(),
+            column_order=[
+                "property_name_or_address",
+                "iso3",
+                "occupancy",
+                "value",
+                "standalone_probability_pct",
+                "location_factor",
+                "occupancy_factor",
+            ],
             hide_index=True,
             width="stretch",
             height=min(38 + 35 * len(current["sites"]), 520),
@@ -274,6 +271,12 @@ def edit_assumptions() -> None:
                 "iso3": "Country",
                 "occupancy": "Occupancy",
                 "value": st.column_config.NumberColumn("Insured value", format="$%,.0f"),
+                "standalone_probability_pct": st.column_config.NumberColumn(
+                    "Annual targeted-strike probability override (%)",
+                    min_value=0,
+                    max_value=100,
+                    help="Optional expert estimate of the annual probability of a damaging targeted strike. No full conflict is required. Replaces the modelled sub-threshold probability; leave blank to use the model. Damage severity stays modelled. 0 disables sub-threshold damage.",
+                ),
                 "location_factor": st.column_config.NumberColumn(
                     "Location ×", min_value=0, max_value=100, help="Multiple of the country's average property"
                 ),
@@ -285,7 +288,7 @@ def edit_assumptions() -> None:
         )
     apply, cancel = st.columns(2)
     if apply.button("Apply and run", type="primary", width="stretch"):
-        st.session_state.assumptions |= {"countries": countries_edit, "sites": sites_edit}
+        st.session_state.assumptions = {"countries": pl.from_arrow(countries_edit), "sites": pl.from_arrow(sites_edit)}
         st.session_state.run_requested = True
         theatres_version.clear()  # check for new theatres alongside the run
         st.rerun()
@@ -293,40 +296,50 @@ def edit_assumptions() -> None:
         st.rerun()
 
 
-def assumption_lines(assumptions: dict[str, pd.DataFrame]) -> list[str]:
+def assumption_lines(assumptions: dict[str, pl.DataFrame]) -> list[str]:
     lines = []
-    for r in assumptions["countries"].itertuples():
+    for r in assumptions["countries"].iter_rows(named=True):
         parts = []
-        if pd.notna(r.onset_pct):
-            parts.append(f"onset {r.onset_pct:g}% ({r.conflict_type.replace('_', ' ')})")
-        if pd.notna(r.damage_pct):
-            parts.append(f"damage {r.damage_pct:g}%")
+        if sc._float_or_none(r["onset_pct"]) is not None:
+            parts.append(f"onset {r['onset_pct']:g}%")
+        if sc._float_or_none(r["damage_pct"]) is not None:
+            parts.append(f"damage {r['damage_pct']:g}%")
         if parts:
-            lines.append(f"**{r.iso3}**: " + ", ".join(parts))
-    for r in assumptions["sites"].itertuples():
+            lines.append(f"**{r['iso3']}**: " + ", ".join(parts))
+    for r in assumptions["sites"].iter_rows(named=True):
         parts = []
-        if pd.notna(r.location_factor):
-            parts.append(f"location ×{r.location_factor:g}")
-        if pd.notna(r.occupancy_factor):
-            parts.append(f"occupancy ×{r.occupancy_factor:g}")
+        if sc._float_or_none(r["location_factor"]) is not None:
+            parts.append(f"location ×{r['location_factor']:g}")
+        if sc._float_or_none(r["occupancy_factor"]) is not None:
+            parts.append(f"occupancy ×{r['occupancy_factor']:g}")
+        if sc._float_or_none(r["standalone_probability_pct"]) is not None:
+            parts.append(f"targeted-strike probability {r['standalone_probability_pct']:g}% annually")
         if parts:
-            lines.append(f"**{r.property_name_or_address}**: " + ", ".join(parts))
-    for iso3, shares in assumptions["theatres"].items():
-        lines += [f"**{iso3}** theatre {t}: {s:.0%} of fighting" for t, s in shares.items()]
+            lines.append(f"**{r['property_name_or_address']}**: " + ", ".join(parts))
     return lines
+
+
+@st.dialog("Portfolio locations", width="large")
+def show_portfolio() -> None:
+    st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
+    st.dataframe(
+        portfolio,
+        hide_index=True,
+        width="stretch",
+        column_config={"value": st.column_config.NumberColumn("Insured value", format="$%,.0f")},
+    )
+    if st.button("Close", width="stretch"):
+        st.rerun()
 
 
 with st.sidebar:
     st.title("Silfio")
     tab_book, tab_scenario = st.tabs(["Portfolio", "Scenario"])
     with tab_book:
-        st.metric("Insured value", money(portfolio.value.sum()))
+        st.metric("Insured value", money(portfolio["value"].sum()))
         st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
-        st.dataframe(
-            portfolio[["property_name_or_address", "iso3", "occupancy", "value"]],
-            hide_index=True,
-            column_config={"value": st.column_config.NumberColumn("value", format="$%,.0f")},
-        )
+        if st.button("View locations", width="stretch"):
+            show_portfolio()
         if st.button("Refresh results", help="Rerun the model instead of using saved results"):
             run_cached.clear()
             theatres_version.clear()
@@ -348,7 +361,7 @@ baseline = run_cached(json.dumps(sc.build_payload(portfolio)))
 views = {"Baseline": baseline}
 if st.session_state.pop("run_requested", False):
     assumptions = st.session_state.assumptions
-    payload = sc.build_payload(portfolio, assumptions["sites"], assumptions["countries"], assumptions["theatres"])
+    payload = sc.build_payload(portfolio, assumptions["sites"], assumptions["countries"])
     if sc.is_scenario(payload):
         st.session_state.scenario_results = run_cached(json.dumps(payload))
         st.session_state.view = "Scenario"
@@ -361,65 +374,71 @@ if st.session_state.get("view") not in views:
 
 left, right = st.columns([3, 1])
 view = left.radio("View", list(views), horizontal=True, label_visibility="collapsed", key="view")
-show_theatres = right.toggle("Theatres", help="Each country's theatres, shaded by the model's share of the fighting")
+show_theatres = right.toggle(
+    "Theatres", help="Each country's theatres, shaded by the selected view's share of the fighting"
+)
 tables = views[view]
+scenario_shares = tables.get("scenario_theatre_shares") if view == "Scenario" else None
+if view == "Scenario" and scenario_shares is None:
+    st.info("Missing scenario shares: update the API, then Refresh results and Apply and run.")
 base_kpi, kpi = sc.headline(baseline), sc.headline(tables)
 
 cols = st.columns(4)
 for col, (label, key) in zip(
     cols,
-    [("Expected loss", "expected_loss"), ("1-in-100 (VaR 99%)", "var_99"), ("TVaR 99%", "tvar_99"), ("Net expected loss", "net_expected_loss")],
+    [
+        ("Expected loss", "expected_loss"),
+        ("1-in-100 (VaR 99%)", "var_99"),
+        ("TVaR 99%", "tvar_99"),
+        ("Net expected loss", "net_expected_loss"),
+    ],
 ):
     delta = None if view == "Baseline" else money(kpi[key] - base_kpi[key])
     col.metric(label, money(kpi[key]), delta, delta_color="inverse")
 
-ongoing_view = False
+ongoing_view = subthreshold_view = False
 try:
     version = theatres_version()
-    has_ongoing = fetch_theatres(countries, version)[1].ongoing_share.notna().any()
-    editing = show_theatres and right.toggle("Edit theatres", help="Pick a country, then click a theatre to set its share")
-    if show_theatres and has_ongoing:
-        ongoing_view = (
-            right.radio(
-                "Shares",
-                ["New conflict", "Ongoing conflicts"],
-                horizontal=True,
-                label_visibility="collapsed",
-                help="Ongoing: where the model sends fighting if a current conflict continues",
-            )
-            == "Ongoing conflicts"
-        )
-    edit_country = st.selectbox("Country to edit", countries) if editing else None
-    scenario = tuple(
-        (iso3, t, s) for iso3, shares in st.session_state.assumptions["theatres"].items() for t, s in shares.items()
+    has_ongoing = fetch_theatres(countries, version)[1]["ongoing_share"].is_not_null().any()
+    if show_theatres:
+        choices = ["New conflict", "Sub-threshold"] + (["Ongoing conflicts"] if has_ongoing else [])
+        split = right.selectbox("Theatre split", choices)
+        ongoing_view, subthreshold_view = split == "Ongoing conflicts", split == "Sub-threshold"
+    polygons, share_labels, centres = theatre_layers(
+        countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
     )
-    polygons, share_labels, centres = theatre_layers(countries, version, ongoing_view, LABEL_MIN_SHARE, scenario)
     if not (HERE / polygons.removeprefix("app/")).exists():  # file cleared since it was cached
         theatre_layers.clear()
-        polygons, share_labels, centres = theatre_layers(countries, version, ongoing_view, LABEL_MIN_SHARE, scenario)
+        polygons, share_labels, centres = theatre_layers(
+            countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
+        )
 except Exception as error:  # the map still works without theatres
-    editing = False
-    polygons, share_labels, centres = None, [], pd.DataFrame(columns=["iso3", "shown", "latitude", "longitude"])
+    polygons, share_labels, centres = (
+        None,
+        [],
+        pl.DataFrame(schema={"iso3": pl.String, "shown": pl.Float64, "latitude": pl.Float64, "longitude": pl.Float64}),
+    )
     if show_theatres:
         st.warning(f"Theatres unavailable: {error}")
 sites = sc.site_results(portfolio, tables)
-sites["theatre_share"] = site_theatre_share(sites, centres)
-radius = 5 + 9 * np.sqrt(sites.value / sites.value.max())
+sites = sites.with_columns(pl.Series("theatre_share", site_theatre_share(sites, centres)))
+theatre_measure = "sub-threshold incidents" if subthreshold_view else "fighting"
+radius = 5 + 9 * np.sqrt(sites["value"].to_numpy() / sites["value"].max())
 site_data = [
     {
         "position": [lon, lat],
         "radius": r,
         "colour": c,
-        "label": f"{name}: {bps:,.1f} bps" + ("" if np.isnan(s) else f" · theatre {s:.1%} of fighting"),
+        "label": f"{name}: {bps:,.1f} bps" + ("" if np.isnan(s) else f" · theatre {s:.1%} of {theatre_measure}"),
     }
     for name, lon, lat, r, c, bps, s in zip(
-        sites.property_name_or_address,
-        sites.longitude,
-        sites.latitude,
+        sites["property_name_or_address"],
+        sites["longitude"],
+        sites["latitude"],
         radius,
-        ramp(sites.bps.to_numpy(), BPS_RANGE, PALETTE, alpha=220),
-        sites.bps,
-        sites.theatre_share,
+        ramp(sites["bps"].to_numpy(), BPS_RANGE, PALETTE, alpha=220),
+        sites["bps"],
+        sites["theatre_share"],
     )
 ]
 
@@ -434,7 +453,7 @@ if show_theatres and polygons:
             get_line_color=[255, 255, 255, 200],
             line_width_min_pixels=0.5,
             stroked=True,
-            pickable=not editing,
+            pickable=True,
         ),
         pdk.Layer(
             "TextLayer",
@@ -450,23 +469,6 @@ if show_theatres and polygons:
             pickable=True,
         ),
     ]
-if editing:
-    # Clicks are only reported for data sent with the page, so send one country
-    editable = [o for o in theatre_objects(countries, version, ongoing_view, scenario)[0] if o["iso3"] == edit_country]
-    layers.append(
-        pdk.Layer(
-            "PolygonLayer",
-            editable,
-            id="theatres",
-            get_polygon="polygon",
-            get_fill_color=[0, 0, 0, 0],
-            get_line_color=[11, 22, 48, 160],
-            line_width_min_pixels=1,
-            stroked=True,
-            pickable=True,
-            auto_highlight=True,
-        )
-    )
 layers.append(
     pdk.Layer(
         "ScatterplotLayer",
@@ -482,40 +484,30 @@ layers.append(
     )
 )
 
-event = st.pydeck_chart(
+st.pydeck_chart(
     pdk.Deck(
         map_style="light",
-        initial_view_state=fit_view(centres[centres.iso3 == edit_country] if editing else sites),
+        initial_view_state=fit_view(sites),
         layers=layers,
         tooltip={"text": "{label}"},
     ),
     height=560,
-    on_select="rerun" if editing else "ignore",
-    selection_mode="single-object",
-    key="map",
 )
-if editing:
-    picked = (event.selection.objects or {}).get("theatres") if event else None
-    if picked:
-        st.session_state.picked = {k: picked[0][k] for k in ("iso3", "theatre_id", "share")}
-    edit_theatre_panel(st.session_state.get("picked"))
 caption = "Circle size: insured value. Colour: annual loss cost in bps of value, 0.1 (blue) to 200+ (red)."
 if show_theatres:
-    caption += (
-        " Shading: theatre's share of its country's fighting"
-        + (
-            " if a current conflict continues (recent fighting blended with the base split; averaged where there are several)"
-            if ongoing_view
-            else " in a new conflict"
-        )
-        + f", labelled from {LABEL_MIN_SHARE:.0%}."
-    )
+    caption += f" Shading: theatre's share of its country's {theatre_measure}; labels from {LABEL_MIN_SHARE:.0%}."
+    if subthreshold_view:
+        caption += " Model incident locations; direct site probability overrides do not redistribute these shares."
+    elif ongoing_view:
+        caption += " Ongoing conflicts: recent fighting blended with the model split."
+    if not subthreshold_view and scenario_shares is not None and not scenario_shares.is_empty():
+        caption += " Scenario splits apply to new and ongoing conflicts."
 st.caption(caption)
 
 st.dataframe(
-    sites.sort_values("bps", ascending=False)[
-        ["property_name_or_address", "iso3", "value", "expected_loss", "bps", "hit_frequency", "theatre_share"]
-    ],
+    sites.sort("bps", descending=True).select(
+        "property_name_or_address", "iso3", "value", "expected_loss", "bps", "hit_frequency", "theatre_share"
+    ),
     hide_index=True,
     width="stretch",
     column_config={
