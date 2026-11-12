@@ -75,14 +75,13 @@ an evaluation or local implementation; the service enforces your key's limits.
 
 ## First run
 
-1. Select **example_small** (6 properties) or **example** (58 properties) from
-   **Book** to explore a supplied fictional portfolio,
-   or add your own CSV as described below.
+1. Select a supplied example portfolio from **Book**, or add your own CSV as
+   described below. Book names are taken directly from the files in `books/`.
 2. Review the location map, available immediately with neutral markers before any
    calculation. Hover for property details, or open **View locations** to check
    the input data.
-3. Click **Run baseline** to calculate the baseline. Opening the dashboard or selecting a
-   book does not run the model.
+3. In the **Baseline** tab, click **Run baseline** to calculate the baseline.
+   Opening the dashboard or selecting a book does not run the model.
 4. Review the headline losses, map, location breakdown and **Pricing details**.
 5. Open the **Scenario** tab to test alternative assumptions, then compare
    **Baseline** and **Scenario** using the view selector above the results.
@@ -98,9 +97,9 @@ Each CSV in `books/` is a separate **book**, named after its file. For example,
 Add the file and reload the dashboard. Switching books clears the active
 assumptions and results; it does not delete scenarios saved to file.
 
-Two fictional USD portfolios are included: `books/example2.csv` contains
-6 properties in 5 countries, and `books/example.csv` contains 58 properties in
-42 countries. Both can serve as input templates. Use one row per property:
+The fictional USD portfolios in `books/` can serve as input templates. The
+dashboard discovers CSV files automatically, so you can add or rename books
+without changing the code. Use one row per property:
 
 | Column | Required | Description |
 |---|---|---|
@@ -155,10 +154,18 @@ quoted premium or a price including expenses, brokerage and profit margin.
 
 ### Map and location breakdown
 
-Each circle represents a property. Circle size indicates insured value; colour
-indicates annual ground-up loss cost in basis points of value, from blue for lower
-loss costs to red for higher loss costs. One basis point is 0.01%. Hover over a
-location for its loss cost and, when available, theatre share.
+The map opens with equal-sized, neutral markers before any run. Hover over a
+marker for the property name, country and original-currency insured value.
+
+After a run, circle size indicates insured value in USD; colour indicates annual
+ground-up loss cost in basis points of value, from blue for lower loss costs to
+red for higher loss costs. One basis point is 0.01%. Hover over a location for its
+loss cost and, when available, theatre share.
+
+The map updates in place as results arrive, with a short transition in marker
+colour and size. Its initial camera settings stay the same for the selected book
+so updates can retain the current pan and zoom. Zooming out is limited to the
+full-world view.
 
 The main table shows insured value, expected loss and loss cost. Location tables
 and Pricing details retain one row per property and sort by **region → country
@@ -184,8 +191,8 @@ This table explains the property-level drivers behind the selected result:
 | Vulnerability if hit | Expected loss divided by USD insured value and damage probability. Undefined values remain blank. |
 | Expected loss, loss cost and TVaR 99% | Property-level ground-up loss measures. |
 
-Blank fields indicate unavailable results, not zero risk. If older saved results
-lack rating factors, press **Run baseline** or **Run scenario** to request them.
+Blank fields indicate unavailable results, not zero risk. If results lack rating
+factors, press **Run baseline** or **Run scenario** to request them again.
 
 ### Theatres
 
@@ -224,9 +231,10 @@ Click **Apply changes** to keep your edits, then **Run scenario** in the Scenari
 tab to calculate. Loading, editing, saving and clearing assumptions do not run the
 model. Scenario runs are independent of baseline runs; use **Run baseline** in the
 Baseline tab when you want a comparison. The view switches to Scenario when results
-are ready. Switch between
-views to compare losses, maps and pricing details. **Clear scenario** removes the
-active overrides and scenario results.
+are ready. Once both views have results, switch between them to compare losses,
+maps and pricing details. Applying or loading assumptions clears the previous
+scenario results; press **Run scenario** to calculate the updated assumptions.
+**Clear scenario** removes the active overrides and scenario results.
 
 ### Save and reuse assumptions
 
@@ -238,8 +246,8 @@ scenario**, optionally review and **Apply changes** in **Edit assumptions**, the
 click **Run scenario** in the sidebar.
 Loading replaces the current assumptions but does not launch a calculation.
 
-Scenarios are stored in `silfio_dashboard/data/scenarios.csv` and shared by users of the same
-installation. They can be reused across books: country overrides match ISO3 codes
+Scenarios are stored in `silfio_dashboard/data/scenarios.csv` and shared by users
+of the same installation. They can be reused across books: country overrides match ISO3 codes
 and site overrides match exact property names. Only matching entries are applied.
 You can also edit this file in Excel, preserving its header and saving as UTF-8 CSV.
 Blank values retain model assumptions; zero is an explicit override.
@@ -252,8 +260,9 @@ you inspect the dashboard; changing views or editing assumptions does not start
 another calculation. Reloading into a new session requires a new run.
 
 Portfolio CSVs and saved scenarios are held locally. Calculating a new result
-sends the portfolio, generated policy terms and any overrides to the configured API. Local installation of this dashboard therefore does not mean
-local-only processing. Confirm API data-handling arrangements with Silfio before
+sends the portfolio, generated policy terms and any overrides to the configured
+API. Local installation of this dashboard therefore does not mean local-only
+processing. Confirm API data-handling arrangements with Silfio before
 using live client data.
 
 The default service address is configured in the application. If Silfio provides
@@ -294,4 +303,3 @@ whitepaper for further detail.
 - `silfio_dashboard/data/`: bundled reference data, including country regions.
 - `books/`: portfolio input CSVs.
 - `silfio_dashboard/data/scenarios.csv`: saved user scenarios.
-- `tests/`: automated checks.
