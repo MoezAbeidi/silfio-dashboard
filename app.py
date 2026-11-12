@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -51,6 +52,17 @@ BOOK_COLUMNS = (
 )
 API_KEY = secret("SILFIO_API_KEY") or st.session_state.get("api_key", "")
 FREE_MAX_PROPERTIES = 10  # The API runs keyless baselines up to this many properties
+# "session" keeps each visitor's saved scenarios private to their browser session (for hosted use);
+# the default "file" shares them through SCENARIOS_FILE, as suits a local installation.
+SESSION_SCENARIOS = secret("SILFIO_SCENARIO_STORAGE", "file").strip().lower() == "session"
+
+
+def scenarios_file() -> Path:
+    if not SESSION_SCENARIOS:
+        return SCENARIOS_FILE
+    if "scenarios_file" not in st.session_state:
+        st.session_state.scenarios_file = Path(tempfile.mkdtemp(prefix="silfio-")) / "scenarios.csv"
+    return st.session_state.scenarios_file
 
 
 def run_model(payload: dict) -> dict[str, pl.DataFrame]:
@@ -371,17 +383,23 @@ def edit_assumptions() -> None:
     st.divider()
     scenario_name = st.text_input("Scenario name", key="scenario_save_name")
     st.caption("Saving an existing name replaces that saved scenario. Saving does not run the model.")
-    if st.button("Save scenario to file", width="stretch"):
+    if st.button("Save scenario for this session" if SESSION_SCENARIOS else "Save scenario to file", width="stretch"):
         try:
             scenario_store.save(
-                SCENARIOS_FILE,
+                scenarios_file(),
                 scenario_name,
                 {"countries": pl.from_arrow(countries_edit), "sites": pl.from_arrow(sites_edit)},
             )
         except (OSError, ValueError) as error:
             st.error(f"Could not save scenario: {error}")
         else:
-            st.success(f"Saved {scenario_name.strip()} to {SCENARIOS_FILE.relative_to(HERE)}.")
+            if SESSION_SCENARIOS:
+                st.success(
+                    f"Saved {scenario_name.strip()} for this session only. "
+                    "Download your scenarios from the Scenario tab to keep them."
+                )
+            else:
+                st.success(f"Saved {scenario_name.strip()} to {SCENARIOS_FILE.relative_to(HERE)}.")
     apply, cancel = st.columns(2)
     if apply.button("Apply changes", type="primary", width="stretch"):
         st.session_state.assumptions = {"countries": pl.from_arrow(countries_edit), "sites": pl.from_arrow(sites_edit)}
@@ -390,6 +408,32 @@ def edit_assumptions() -> None:
         st.rerun()
     if cancel.button("Cancel", width="stretch"):
         st.rerun()
+
+
+def session_scenarios_io(saved_scenarios: dict) -> None:
+    """Hosted mode: scenarios leave the session only as a download, and return as an upload."""
+    if saved_scenarios:
+        st.download_button(
+            "Download saved scenarios",
+            scenarios_file().read_bytes(),
+            file_name="scenarios.csv",
+            mime="text/csv",
+            width="stretch",
+        )
+    upload = st.file_uploader("Upload saved scenarios (CSV)", type="csv", key="scenarios_upload")
+    if upload is not None and st.session_state.get("scenarios_uploaded") != upload.file_id:
+        candidate = scenarios_file().with_name("upload.csv")
+        candidate.write_bytes(upload.getvalue())
+        try:
+            scenario_store.load(candidate)
+        except (OSError, ValueError) as error:
+            candidate.unlink(missing_ok=True)
+            st.error(f"Could not read that file: {error}")
+        else:
+            os.replace(candidate, scenarios_file())
+            st.session_state.scenarios_uploaded = upload.file_id
+            st.rerun()
+    st.caption("Saved scenarios are private to this browser session and are cleared when it ends.")
 
 
 def assumption_lines(assumptions: dict[str, pl.DataFrame]) -> list[str]:
@@ -438,7 +482,7 @@ with st.sidebar:
         baseline_requested = st.button("Run baseline", type="primary", width="stretch")
     with tab_scenario:
         try:
-            saved_scenarios = scenario_store.load(SCENARIOS_FILE)
+            saved_scenarios = scenario_store.load(scenarios_file())
         except (OSError, ValueError) as error:
             st.warning(f"Could not read saved scenarios: {error}")
             saved_scenarios = {}
@@ -456,6 +500,8 @@ with st.sidebar:
             st.caption("Loading only updates assumptions. Press Run scenario to calculate results.")
         else:
             st.caption("No saved scenarios yet.")
+        if SESSION_SCENARIOS:
+            session_scenarios_io(saved_scenarios)
         lines = assumption_lines(st.session_state.assumptions)
         if lines:
             st.markdown("\n".join(f"- {line}" for line in lines))

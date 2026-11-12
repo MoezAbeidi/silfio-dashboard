@@ -249,7 +249,10 @@ click **Run scenario** in the sidebar.
 Loading replaces the current assumptions but does not launch a calculation.
 
 Scenarios are stored in `silfio_dashboard/data/scenarios.csv` and shared by users
-of the same installation. They can be reused across books: country overrides match ISO3 codes
+of the same installation. For a hosted deployment, set `SILFIO_SCENARIO_STORAGE`
+to `session` in the environment: each visitor's saved scenarios then stay private
+to their browser session, with download and upload buttons in the Scenario tab to
+keep and reuse them. They can be reused across books: country overrides match ISO3 codes
 and site overrides match exact property names. Only matching entries are applied.
 You can also edit this file in Excel, preserving its header and saving as UTF-8 CSV.
 Blank values retain model assumptions; zero is an explicit override.
