@@ -156,7 +156,10 @@ def theatre_layers(
         if old.name != name and time.time() - old.stat().st_mtime > 86_400:
             old.unlink(missing_ok=True)
     if not (STATIC / name).exists():
-        (STATIC / name).write_text(body)
+        # Write then rename, so a visitor never fetches a file another session is still writing.
+        with tempfile.NamedTemporaryFile("w", dir=STATIC, suffix=".tmp", delete=False) as handle:
+            handle.write(body)
+        os.replace(handle.name, STATIC / name)
     first = t.select(pl.struct("iso3", "theatre_id").is_first_distinct()).to_series().to_numpy()
     centres = t.filter(first).select("iso3", "theatre_id", "shown", "latitude", "longitude")
     big = first & (t["shown"].to_numpy() >= label_min)
@@ -703,7 +706,12 @@ try:
     polygons, share_labels, centres = theatre_layers(
         countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
     )
-    if not (HERE / polygons.removeprefix("app/")).exists():  # file cleared since it was cached
+    polygons_file = HERE / polygons.removeprefix("app/")
+    try:
+        os.utime(polygons_file)  # mark as in use, so other sessions' cleanup keeps it
+    except FileNotFoundError:
+        pass
+    if not polygons_file.exists():  # file cleared since it was cached
         theatre_layers.clear()
         polygons, share_labels, centres = theatre_layers(
             countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
