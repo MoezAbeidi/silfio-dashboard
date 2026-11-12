@@ -113,7 +113,8 @@ without changing the code. Use one row per property:
 | `property_sqm` | Yes | Building area in square metres. |
 | `building_floors` | Yes | Number of building floors. |
 | `city` | No | Additional location information. |
-| `deductible_pct` | No | Per-occurrence deductible as a fraction of value; defaults to `0.01` (1%). |
+| `deductible_pct` | No | Per-occurrence deductible as a fraction of value; defaults to `0.01` (1%). Used only when the book has no policies file. |
+| `policy_ids` | No | Policies covering the property, separated by `;`. Used with a policies file. |
 
 Use numeric values without currency symbols or thousands separators, and save as
 UTF-8 CSV. Keep property names unique and stable if you intend to reuse scenarios.
@@ -123,6 +124,20 @@ Input views retain the original values and currency codes. Before a run, the
 sidebar shows separate totals by currency; once converted values are available,
 it shows a combined USD total. Result tables, map sizing and loss costs use the
 API's USD property values consistently.
+
+### Policies and reinsurance
+
+A book can carry its own policies in `books/policies/<book>.csv`, in the same
+format as the Silfio API and engine CSV: one row per insurance policy or
+reinsurance treaty (`contract_type`), properties mapped to policies through
+`policy_ids`, and policies mapped to treaties through `reinsurance_ids`. The
+`example` book includes a small programme: two policies, a 30% quota share and a
+per-occurrence cat XoL. Books without a policies file get one policy per property
+(`deductible_pct` of value, 100% participation, limit equal to the remaining value).
+
+**Upload portfolio** in the sidebar takes a properties CSV and an optional policies
+CSV, with templates for both. Uploads are private to the browser session and are
+not written to the books folder.
 
 To use another portfolio folder, add an absolute path to your secrets file:
 
@@ -142,17 +157,11 @@ view. Scenario changes are shown relative to the baseline.
 | **Ground-up expected loss** | Average annual property damage before insurance terms. |
 | **Ground-up VaR 99%** | Annual aggregate loss at the 99th percentile, commonly described as a 1-in-100 loss. |
 | **Ground-up TVaR 99%** | Average annual loss within the worst 1% of simulated years. |
-| **Insurer net expected loss** | Average annual loss retained by the insurer after the financial terms represented in the run. |
+| **Insurer net expected loss** | Average annual loss retained by the insurer after policy terms and reinsurance. |
+| **Reinsurer expected loss** | Average annual loss ceded to the treaties; shown when the book has reinsurance. |
 
-The first three figures measure property damage, not the insurer's claim cost.
-The fourth reflects insurance terms. Missing insurer results display **N/A**.
-Hover over a figure's help icon for its definition.
-
-This dashboard creates **one policy per property**, with 100% participation, an
-excess deductible and an occurrence limit equal to the remaining insured value.
-It does not submit reinsurance treaties, so insurer net here reflects those policy
-terms without a reinsurance programme. Expected loss is a loss estimate, not a
-quoted premium or a price including expenses, brokerage and profit margin.
+Expected loss is a loss estimate, not a quoted premium or a price including
+expenses, brokerage and profit margin.
 
 ### Map and location breakdown
 
@@ -290,9 +299,8 @@ or environment. Hosting the modelling engine itself is a separate deployment.
 
 This interface supports property portfolio review, geographic concentration
 analysis and assumption-based scenario testing. It does not currently expose the
-engine's investment modelling, shared multi-property policy structures, custom
-insurance layers or reinsurance configuration. Those capabilities require a
-separate integration with the wider API.
+engine's investment modelling, which requires a separate integration with the
+wider API.
 
 Results are probabilistic estimates under the model and supplied assumptions, not
 predictions of a specific attack or guaranteed loss outcomes. Use the baseline and

@@ -1,11 +1,11 @@
-property_name_or_address,city,iso3,latitude,longitude,occupancy,value,currency,property_sqm,building_floors
-Baghdad hotel,Baghdad,IRQ,33.310,44.360,commercial,40000000,USD,25000,15
-Sanaa office building,Sanaa,YEM,15.369,44.191,commercial,18000000,USD,10000,8
-Khartoum office building,Khartoum,SDN,15.590,32.530,commercial,20000000,USD,10000,8
-Damascus hotel,Damascus,SYR,33.510,36.290,commercial,25000000,USD,15000,10
-Beirut office building,Beirut,LBN,33.890,35.500,commercial,25000000,USD,9000,10
-Dubai office tower,Dubai,ARE,25.2,55.27,commercial,100000000,USD,45000,40
-Warsaw office building,Warsaw,POL,52.23,21.012,commercial,65000000,USD,30000,22
-Tokyo business centre,Tokyo,JPN,35.676,139.65,commercial,160000000,USD,50000,35
-Dublin office building,Dublin,IRL,53.35,-6.26,commercial,75000000,USD,25000,12
-Sydney business centre,Sydney,AUS,-33.869,151.209,commercial,130000000,USD,42000,30
+property_name_or_address,city,iso3,latitude,longitude,occupancy,value,currency,property_sqm,building_floors,policy_ids
+Baghdad hotel,Baghdad,IRQ,33.310,44.360,commercial,40000000,USD,25000,15,POL-MENA
+Sanaa office building,Sanaa,YEM,15.369,44.191,commercial,18000000,USD,10000,8,POL-MENA
+Khartoum office building,Khartoum,SDN,15.590,32.530,commercial,20000000,USD,10000,8,POL-MENA
+Damascus hotel,Damascus,SYR,33.510,36.290,commercial,25000000,USD,15000,10,POL-MENA
+Beirut office building,Beirut,LBN,33.890,35.500,commercial,25000000,USD,9000,10,POL-MENA
+Dubai office tower,Dubai,ARE,25.2,55.27,commercial,100000000,USD,45000,40,POL-MENA
+Warsaw office building,Warsaw,POL,52.23,21.012,commercial,65000000,USD,30000,22,POL-INTL
+Tokyo business centre,Tokyo,JPN,35.676,139.65,commercial,160000000,USD,50000,35,POL-INTL
+Dublin office building,Dublin,IRL,53.35,-6.26,commercial,75000000,USD,25000,12,POL-INTL
+Sydney business centre,Sydney,AUS,-33.869,151.209,commercial,130000000,USD,42000,30,POL-INTL

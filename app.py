@@ -58,13 +58,16 @@ FREE_MAX_PROPERTIES = 10  # The API runs keyless baselines up to this many prope
 DOWNLOAD_SCENARIOS = secret("SILFIO_SCENARIO_STORAGE", "file").strip().lower() in ("download", "session")
 
 
+def session_dir() -> Path:
+    """Private scratch folder for this browser session's uploads."""
+    if "session_dir" not in st.session_state:
+        st.session_state.session_dir = Path(tempfile.mkdtemp(prefix="silfio-"))
+    return st.session_state.session_dir
+
+
 def scenarios_file() -> Path:
     """Where saved scenarios are read from: the repo file, or a per-session copy of the visitor's upload."""
-    if not DOWNLOAD_SCENARIOS:
-        return SCENARIOS_FILE
-    if "scenarios_file" not in st.session_state:
-        st.session_state.scenarios_file = Path(tempfile.mkdtemp(prefix="silfio-")) / "scenarios.csv"
-    return st.session_state.scenarios_file
+    return session_dir() / "scenarios.csv" if DOWNLOAD_SCENARIOS else SCENARIOS_FILE
 
 
 def run_model(payload: dict) -> dict[str, pl.DataFrame]:
@@ -218,10 +221,62 @@ def money(x: float) -> str:
     return f"${x / 1e6:,.2f}m" if abs(x) < 1e7 else f"${x / 1e6:,.1f}m"
 
 
+UPLOADED = " (uploaded)"
+PROPERTIES_TEMPLATE = (
+    ",".join(("property_name_or_address", "city", *BOOK_COLUMNS[1:], "policy_ids")) + "\n"
+    "Example office,Dubai,ARE,25.2,55.27,commercial,100000000,USD,45000,40,POL-001\n"
+)
+
+
 def book_files() -> dict[str, Path]:
-    """Every CSV in the books folder, by file name without the extension."""
+    """Every CSV in the books folder, by file name without the extension, then this session's uploads."""
     files = sorted(BOOKS_DIR.glob("*.csv"), key=lambda f: f.stem.lower()) if BOOKS_DIR.is_dir() else []
-    return {f.stem: f for f in files}
+    uploads = sorted((session_dir() / "books").glob("*.csv"))
+    return {f.stem: f for f in files} | {f.stem + UPLOADED: f for f in uploads}
+
+
+def policies_file(book: str, path: Path) -> Path | None:
+    """This session's uploaded policies for the book, else the book's bundled policies file."""
+    for candidate in (session_dir() / "policies" / f"{book}.csv", path.parent / "policies" / path.name):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def take_uploads() -> None:
+    """Store newly uploaded properties/policies in this session's folder; never on shared disk."""
+    upload = st.session_state.get("upload_properties")
+    if upload is not None and st.session_state.get("taken_properties") != upload.file_id:
+        st.session_state.taken_properties = upload.file_id
+        try:
+            frame = pl.read_csv(upload.getvalue())
+            missing = [c for c in BOOK_COLUMNS if c not in frame.columns]
+            if missing:
+                raise ValueError(f"missing column(s) {', '.join(missing)}")
+        except (ValueError, pl.exceptions.PolarsError) as error:
+            st.session_state.upload_error = f"Could not read {upload.name}: {error}"
+        else:
+            folder = session_dir() / "books"
+            folder.mkdir(exist_ok=True)
+            stem = "".join(c if c.isalnum() or c in "-_ " else "_" for c in Path(upload.name).stem) or "portfolio"
+            (folder / f"{stem}.csv").write_bytes(upload.getvalue())
+            reset_for_new_book()
+            st.session_state.book = stem + UPLOADED
+            st.session_state.pop("upload_error", None)
+    upload = st.session_state.get("upload_policies")
+    if upload is not None and st.session_state.get("taken_policies") != upload.file_id:
+        st.session_state.taken_policies = upload.file_id  # applies to the book selected when uploaded
+        try:
+            sc.load_policies(upload.getvalue())
+        except (ValueError, pl.exceptions.PolarsError) as error:
+            st.session_state.upload_error = f"Could not read {upload.name}: {error}"
+        else:
+            folder = session_dir() / "policies"
+            folder.mkdir(exist_ok=True)
+            (folder / f"{st.session_state.get('book')}.csv").write_bytes(upload.getvalue())
+            for key in ("baseline_results", "scenario_results", "run_error"):
+                st.session_state.pop(key, None)
+            st.session_state.pop("upload_error", None)
 
 
 def reset_for_new_book() -> None:
@@ -241,6 +296,7 @@ def reset_for_new_book() -> None:
         st.session_state.pop(key, None)
 
 
+take_uploads()
 books = book_files()
 if not books:
     st.title("Silfio")
@@ -258,6 +314,15 @@ try:
 except (OSError, ValueError, pl.exceptions.PolarsError) as error:  # a bad file should not hide the other books
     portfolio = None
     book_error = error
+programme, programme_error = None, None
+policy_path = policies_file(st.session_state.book, book_path)
+if policy_path is not None and portfolio is not None:
+    try:
+        programme = sc.load_policies(policy_path)
+        sc.build_payload(portfolio, programme=programme)  # checks every property's policy_ids
+    except (OSError, ValueError, pl.exceptions.PolarsError) as error:
+        programme, programme_error = None, error
+treaties = programme[1] if programme else []
 
 with st.sidebar:
     st.title("Silfio")
@@ -276,8 +341,29 @@ with st.sidebar:
         list(books),
         key="book",
         on_change=reset_for_new_book,
-        help=f"Each CSV in {BOOKS_DIR} is a book. Switching clears the current scenario.",
     )
+    with st.expander("Upload portfolio"):
+        st.file_uploader("Properties CSV", type="csv", key="upload_properties")
+        st.file_uploader("Policies CSV (optional)", type="csv", key="upload_policies")
+        st.caption("Map properties to policies with policy_ids; policies to treaties with reinsurance_ids.")
+        st.download_button(
+            "Properties template",
+            PROPERTIES_TEMPLATE,
+            "properties_template.csv",
+            "text/csv",
+            on_click="ignore",
+            width="stretch",
+        )
+        st.download_button(
+            "Policies template",
+            sc.POLICY_TEMPLATE,
+            "policies_template.csv",
+            "text/csv",
+            on_click="ignore",
+            width="stretch",
+        )
+        if st.session_state.get("upload_error"):
+            st.error(st.session_state.upload_error)
 if portfolio is None:
     st.error(f"Could not read {book_path.name}: {book_error}")
     st.stop()
@@ -323,9 +409,7 @@ if "conflict_type" in st.session_state.assumptions["countries"].columns:
 
 @st.dialog("Scenario assumptions", width="large")
 def edit_assumptions() -> None:
-    st.caption(
-        "Cells left as None keep the model's own assumption. Apply changes, then press Run scenario in the sidebar to calculate results."
-    )
+    st.caption("Blank cells keep the model assumption.")
     current = st.session_state.assumptions
     tab_countries, tab_sites = st.tabs(["Countries", "Sites"])
     with tab_countries:
@@ -338,19 +422,12 @@ def edit_assumptions() -> None:
             column_config={
                 "iso3": "Country",
                 "sites": st.column_config.NumberColumn("Sites"),
-                "onset_pct": st.column_config.NumberColumn(
-                    "Onset %", min_value=0, max_value=100, help="Annual probability a conflict starts"
-                ),
-                "damage_pct": st.column_config.NumberColumn(
-                    "Damage %", min_value=0, max_value=100, help="Share of buildings damaged in a conflict"
-                ),
+                "onset_pct": st.column_config.NumberColumn("Onset %", min_value=0, max_value=100),
+                "damage_pct": st.column_config.NumberColumn("Damage %", min_value=0, max_value=100),
             },
             key="countries_editor",
         )
     with tab_sites:
-        st.caption(
-            "Optional annual probability of a damaging targeted strike or other sub-threshold incident. No full conflict is required. This replaces the site's modelled sub-threshold risk; blank keeps the model. Damage severity stays modelled."
-        )
         sites_edit = st.data_editor(
             current["sites"].to_arrow(),
             column_order=[
@@ -376,13 +453,13 @@ def edit_assumptions() -> None:
                     "Annual targeted-strike probability override (%)",
                     min_value=0,
                     max_value=100,
-                    help="Optional expert estimate of the annual probability of a damaging targeted strike. No full conflict is required. Replaces the modelled sub-threshold probability; leave blank to use the model. Damage severity stays modelled. 0 disables sub-threshold damage.",
+                    help="Replaces the modelled sub-threshold probability; 0 disables it",
                 ),
                 "location_factor": st.column_config.NumberColumn(
-                    "Location ×", min_value=0, max_value=100, help="Multiple of the country's average property"
+                    "Location ×", min_value=0, max_value=100, help="Relative to the country average"
                 ),
                 "occupancy_factor": st.column_config.NumberColumn(
-                    "Occupancy ×", min_value=0, max_value=100, help="Multiple of a residential building"
+                    "Occupancy ×", min_value=0, max_value=100, help="Relative to residential"
                 ),
             },
             key="sites_editor",
@@ -390,10 +467,9 @@ def edit_assumptions() -> None:
     st.divider()
     scenario_name = st.text_input("Scenario name", key="scenario_save_name")
     if DOWNLOAD_SCENARIOS:
-        st.caption("Downloads a CSV you can upload later from the Scenario tab. Saving does not run the model.")
         scenario_download(scenario_name, countries_edit, sites_edit)
     else:
-        st.caption("Saving an existing name replaces that saved scenario. Saving does not run the model.")
+        st.caption("Saving under an existing name replaces it.")
     if not DOWNLOAD_SCENARIOS and st.button("Save scenario to file", width="stretch"):
         try:
             scenario_store.save(
@@ -501,6 +577,16 @@ with st.sidebar:
     with tab_book:
         exposure_summary = st.empty()
         st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
+        if programme:
+            n = len(programme[0])
+            st.caption(
+                f"{n} {'policy' if n == 1 else 'policies'}"
+                + (" · " + "; ".join(sc.treaty_label(t) for t in treaties) if treaties else "")
+            )
+        else:
+            st.caption("One policy per property, 1% deductible")
+        if programme_error:
+            st.warning(f"Policies not used: {programme_error}")
         if st.button("View locations", width="stretch"):
             show_portfolio()
         baseline_requested = st.button("Run baseline", type="primary", width="stretch")
@@ -521,7 +607,6 @@ with st.sidebar:
                 st.session_state.scenario_save_name = saved_name
                 st.session_state.view = "Baseline"
                 st.rerun()
-            st.caption("Loading only updates assumptions. Press Run scenario to calculate results.")
         elif not DOWNLOAD_SCENARIOS:
             st.caption("No saved scenarios yet.")
         if DOWNLOAD_SCENARIOS:
@@ -530,7 +615,7 @@ with st.sidebar:
         if lines:
             st.markdown("\n".join(f"- {line}" for line in lines))
         else:
-            st.caption("No assumptions set: the scenario is the baseline.")
+            st.caption("No overrides set.")
         if st.button("Edit assumptions", width="stretch"):
             edit_assumptions()
         if lines and st.button("Clear scenario", width="stretch"):
@@ -562,21 +647,23 @@ if baseline_requested or scenario_requested:
         theatres_version.clear()
         try:
             if baseline_requested:
-                baseline = run_model(sc.build_payload(portfolio))
+                baseline = run_model(sc.build_payload(portfolio, programme=programme))
                 st.session_state.baseline_results = baseline
                 st.session_state.view = "Baseline"
             if scenario_requested:
                 assumptions = st.session_state.assumptions
-                payload = sc.build_payload(portfolio, assumptions["sites"], assumptions["countries"])
+                payload = sc.build_payload(
+                    portfolio, assumptions["sites"], assumptions["countries"], programme=programme
+                )
                 st.session_state.scenario_results = run_model(payload)
                 st.session_state.view = "Scenario"
         except Exception as error:  # noqa: BLE001 -- keep the UI available when a run fails
             st.session_state.run_error = f"Silfio could not run: {error}"
 
 if "scenario_results" not in st.session_state:
-    scenario_status.caption("Scenario not run. Press Run scenario when your assumptions are ready.")
+    scenario_status.caption("Not run.")
 else:
-    scenario_status.caption("Scenario results available. Press Run scenario to run again.")
+    scenario_status.caption("Results available.")
 
 # Render after processing a run so the sidebar updates immediately with its USD values.
 exposure_tables = st.session_state.get(
@@ -587,16 +674,14 @@ with exposure_summary.container():
     if usd_values.null_count() == 0:
         st.metric("Insured value (USD)", money(usd_values.sum()))
     else:
-        st.caption("Insured value by input currency")
         for currency, amount in portfolio.group_by("currency").agg(pl.col("value").sum()).sort("currency").iter_rows():
             st.metric(f"Insured value ({currency})", f"{amount:,.0f}")
-        st.caption("A combined USD total is shown when converted values are available from a run.")
 
 with summary_area:
     if st.session_state.get("run_error"):
         st.error(st.session_state.run_error)
         if "baseline_results" in st.session_state or "scenario_results" in st.session_state:
-            st.caption("Previously completed results are still shown. Use Run baseline or Run scenario to retry.")
+            st.caption("Showing the last completed results.")
 
     views = {
         name: st.session_state[key]
@@ -605,7 +690,6 @@ with summary_area:
     }
     if not views:
         st.title("Portfolio")
-        st.info("Choose Run baseline, or load/edit assumptions and press Run scenario. Nothing runs automatically.")
         locations = [
             {
                 "position": [row["longitude"], row["latitude"]],
@@ -643,9 +727,6 @@ with summary_area:
             ),
             height=560,
         )
-        details_area.caption(
-            "Portfolio locations. Markers are neutral and equal-sized until a run calculates loss costs."
-        )
         details_area.dataframe(sc.sort_locations(portfolio), hide_index=True, width="stretch")
         st.stop()
 
@@ -655,7 +736,7 @@ with summary_area:
 
     left, right = st.columns([3, 1])
     view = left.radio("View", list(views), horizontal=True, label_visibility="collapsed", key="view")
-    show_theatres = right.toggle("Theatres", help="Selected share of fighting by country, split by theatre")
+    show_theatres = right.toggle("Theatres")
     tables = views[view]
     scenario_shares = tables.get("scenario_theatre_shares") if view == "Scenario" else None
     if view == "Scenario" and scenario_shares is None:
@@ -665,34 +746,22 @@ with summary_area:
     if view == "Scenario" and baseline is None:
         st.info("Run baseline in the Baseline tab to see comparison changes.")
 
-    cols = st.columns(4)
-    for col, (label, key, help_text) in zip(
-        cols,
-        [
-            ("Ground-up expected loss", "expected_loss", "Expected annual property damage before any insurance terms."),
-            ("Ground-up VaR 99%", "var_99", "1-in-100 annual aggregate property loss before any insurance terms."),
-            (
-                "Ground-up TVaR 99%",
-                "tvar_99",
-                "Average annual property loss in the worst 1% of years, before insurance terms.",
-            ),
-            (
-                "Insurer net expected loss",
-                "net_expected_loss",
-                "Expected annual loss borne by the insurer after policy terms and participation, "
-                "net of reinsurance recoveries and including reinstatement premiums where applicable.",
-            ),
-        ],
-    ):
-        value, base_value = kpi[key], base_kpi.get(key)
+    metrics = [
+        ("Ground-up expected loss", "expected_loss"),
+        ("Ground-up VaR 99%", "var_99"),
+        ("Ground-up TVaR 99%", "tvar_99"),
+        ("Insurer net expected loss", "net_expected_loss"),
+    ]
+    if treaties or (kpi.get("reinsurer_expected_loss") or 0) > 0:
+        metrics.append(("Reinsurer expected loss", "reinsurer_expected_loss"))
+    for col, (label, key) in zip(st.columns(len(metrics)), metrics):
+        value, base_value = kpi.get(key), base_kpi.get(key)
         delta = None
         if view != "Baseline" and value is not None and base_value is not None:
             delta = money(value - base_value)
-        col.metric(label, money(value) if value is not None else "N/A", delta, delta_color="inverse", help=help_text)
+        col.metric(label, money(value) if value is not None else "N/A", delta, delta_color="inverse")
     st.caption(
-        f"{view} · Annual losses in USD. Ground-up = total property damage before insurance. "
-        "Insurer net = insurer's retained loss after policy terms and any reinsurance. "
-        + ("Changes shown are versus baseline." if view == "Scenario" and baseline is not None else "")
+        f"{view} · annual, USD" + (" · change vs baseline" if view == "Scenario" and baseline is not None else "")
     )
 
 ongoing_view = subthreshold_view = False
@@ -801,15 +870,9 @@ map_area.pydeck_chart(
     ),
     height=560,
 )
-caption = "Circle size: insured value in USD. Colour: annual loss cost in bps of value, 0.1 (blue) to 200+ (red)."
+caption = "Size: insured value. Colour: loss cost, 0.1–200+ bps."
 if show_theatres:
-    caption += f" Shading: theatre's share of its country's {theatre_measure}; labels from {LABEL_MIN_SHARE:.0%}."
-    if subthreshold_view:
-        caption += " Model incident locations; direct site probability overrides do not redistribute these shares."
-    elif ongoing_view:
-        caption += " Ongoing conflicts: recent fighting blended with the model split."
-    if not subthreshold_view and scenario_shares is not None and not scenario_shares.is_empty():
-        caption += " Scenario splits apply to new and ongoing conflicts."
+    caption += f" Shading: theatre share of {theatre_measure}."
 with details_area:
     st.caption(caption)
 
@@ -830,15 +893,8 @@ with details_area:
     )
 
     st.subheader("Pricing details")
-    st.caption(
-        f"{view} · Property-level loss drivers, as in the pricing workbook. "
-        "Location relativity is relative to the country's average building; occupancy relativity is relative to residential. "
-        "Vulnerability if hit is expected loss ÷ USD insured value ÷ damage probability. Blank values are unavailable."
-    )
     if "rating_factors" not in tables:
-        st.info(
-            "Rating factors are unavailable in these results. Press the appropriate Run button to request them again."
-        )
+        st.info("Rating factors unavailable for this run.")
     details = sc.sort_locations(
         sc.pricing_details(portfolio, tables).join(
             sites.select("property_name_or_address", "theatre_share"),

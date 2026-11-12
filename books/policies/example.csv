@@ -1,0 +1,5 @@
+policy_id,policy_name,contract_type,insurer,reinsurer,currency,occurrence_attachment,occurrence_limit,participation_pct,reinsurance_ids,reinsurance_structure,reinsurance_basis,cession_pct,reinsurance_attachment,reinsurance_limit,reinstatements,reinstatement_premium_pct
+POL-MENA,MENA property war and terrorism,insurance,Example Insurer,,USD,250000,50000000,1,QS-30;CAT-XL,,,,,,,
+POL-INTL,International property war,insurance,Example Insurer,,USD,500000,100000000,1,CAT-XL,,,,,,,
+QS-30,Quota share,reinsurance,,Reinsurer A,USD,,,,,quota_share,,0.3,,,,
+CAT-XL,Cat excess of loss,reinsurance,,Reinsurer B,USD,,,,,xol,per_occurrence,1,5000000,20000000,1,1

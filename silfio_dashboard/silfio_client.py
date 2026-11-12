@@ -23,11 +23,160 @@ def load_portfolio(path: str) -> pl.DataFrame:
     return df
 
 
+# Policies follow the Silfio API / engine CSV: one file holds insurance policies and reinsurance
+# treaties (contract_type), properties map to policies through policy_ids, and policies map to
+# treaties through reinsurance_ids. List columns are separated by ";".
+POLICY_ALIASES = {
+    "treaty_id": "policy_id",
+    "treaty_ids": "reinsurance_ids",
+    "carrier": "insurer",
+    "counterparty": "insurer",
+    "structure": "reinsurance_structure",
+    "treaty_structure": "reinsurance_structure",
+    "basis": "reinsurance_basis",
+    "reinsurance_type": "reinsurance_basis",
+    "attachment": "reinsurance_attachment",
+    "limit": "reinsurance_limit",
+    "premium": "reinsurance_premium",
+    "deductible": "occurrence_attachment",
+    "occurrence_deductible": "occurrence_attachment",
+}
+POLICY_TEMPLATE = """policy_id,policy_name,contract_type,insurer,reinsurer,inception_date,expiry_date,currency,occurrence_attachment,occurrence_limit,deductible_type,participation_pct,reinsurance_ids,reinsurance_structure,reinsurance_basis,cession_pct,reinsurance_attachment,reinsurance_limit,reinsurance_premium,reinstatements,reinstatement_premium_pct
+POL-001,Property war,insurance,Insurer,,2026-01-01,2027-01-01,USD,250000,50000000,excess,1,QS-01;XL-01,,,,,,,,
+QS-01,Quota share,reinsurance,,Reinsurer A,2026-01-01,2027-01-01,USD,,,,,,quota_share,,0.3,,,,,
+XL-01,Cat XoL,reinsurance,,Reinsurer B,2026-01-01,2027-01-01,USD,,,,,,xol,per_occurrence,1,5000000,20000000,0,1,1
+"""
+
+
+def split_ids(value) -> list[str]:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return []
+    return [part.strip() for part in str(value).replace("|", ";").split(";") if part.strip()]
+
+
+def load_policies(source) -> tuple[list[dict], list[dict]]:
+    """Insurance policies and reinsurance treaties from a policies CSV (path or bytes)."""
+    df = pl.read_csv(source, infer_schema=False)
+    df = df.rename({c: _key(c) for c in df.columns})
+    df = df.rename(
+        {c: POLICY_ALIASES[c] for c in df.columns if c in POLICY_ALIASES and POLICY_ALIASES[c] not in df.columns}
+    )
+    if "policy_id" not in df.columns:
+        raise ValueError("the policies file needs a policy_id column")
+    start = date.today()
+    policies, treaties = [], []
+    for line, row in enumerate(df.iter_rows(named=True), start=2):
+        r = {k: (v.strip() if isinstance(v, str) else v) or None for k, v in row.items()}
+        if not r.get("policy_id"):
+            continue
+        is_treaty = _key(r.get("contract_type") or "") == "reinsurance" or (
+            not r.get("contract_type")
+            and (r.get("reinsurance_structure") or _num(r, "reinsurance_limit") or _num(r, "cession_pct"))
+        )
+        currency = (r.get("currency") or "USD").upper()
+        if is_treaty:
+            structure = _key(r.get("reinsurance_structure") or r.get("reinsurance_basis") or "")
+            quota = structure in ("quota_share", "qs", "proportional")
+            basis = "quota_share" if quota else _key(r.get("reinsurance_basis") or "per_occurrence")
+            if basis not in REINSURANCE_BASES:
+                raise ValueError(f"row {line}: reinsurance_basis must be one of {', '.join(REINSURANCE_BASES)}")
+            treaty = {
+                "treaty_id": r["policy_id"],
+                "reinsurer": r.get("reinsurer"),
+                "cedent": r.get("cedent") or r.get("insurer"),
+                "basis": basis,
+                "currency": currency,
+                "cession_pct": _pct(r, "cession_pct", 1.0),
+                "attachment": 0.0 if quota else _num(r, "reinsurance_attachment", 0.0),
+                "premium": _num(r, "reinsurance_premium", 0.0),
+                "reinstatements": 0 if quota else int(_num(r, "reinstatements", 0)),
+                "reinstatement_premium_pct": 0.0 if quota else _pct(r, "reinstatement_premium_pct", 0.0),
+            }
+            if not quota and _num(r, "reinsurance_limit") is not None:
+                treaty["limit"] = _num(r, "reinsurance_limit")
+            treaties.append({k: v for k, v in treaty.items() if v is not None})
+            continue
+        limit = _num(r, "occurrence_limit")
+        if limit is None:
+            raise ValueError(f"row {line} ({r['policy_id']}): occurrence_limit is required")
+        terms = {
+            "occurrence_attachment": _num(r, "occurrence_attachment", 0.0),
+            "occurrence_limit": limit,
+            "deductible_type": "franchise" if _key(r.get("deductible_type") or "") == "franchise" else "excess",
+            "participation_pct": _pct(r, "participation_pct", 1.0),
+        }
+        if _num(r, "coinsurance_pct") is not None:
+            terms["coinsurance_pct"] = _pct(r, "coinsurance_pct", 1.0)
+        policy = {
+            "policy_id": r["policy_id"],
+            "policy_name": r.get("policy_name"),
+            "insurer": r.get("insurer"),
+            "broker": r.get("broker"),
+            "inception_date": r.get("inception_date") or start.isoformat(),
+            "expiry_date": r.get("expiry_date") or (start + timedelta(days=365)).isoformat(),
+            "currency": currency,
+            "insured_value": _num(r, "insured_value"),
+            "insurance": terms,
+            "reinsurance_ids": split_ids(r.get("reinsurance_ids")),
+        }
+        policies.append({k: v for k, v in policy.items() if v is not None})
+    known = {t["treaty_id"] for t in treaties}
+    for p in policies:
+        missing = [i for i in p["reinsurance_ids"] if i not in known]
+        if missing:
+            raise ValueError(f"policy {p['policy_id']} refers to unknown treaty {', '.join(missing)}")
+    if treaties and not policies:
+        raise ValueError("reinsurance treaties need at least one insurance policy")
+    return policies, treaties
+
+
+def _key(value: str) -> str:
+    return "_".join(str(value).strip().lower().replace("-", " ").split())
+
+
+def _num(row: dict, field: str, default=None):
+    value = row.get(field)
+    if value in (None, ""):
+        return default
+    try:
+        return float(str(value).replace(",", "").replace("%", ""))
+    except ValueError:
+        raise ValueError(f"{field} must be a number (got {value!r})") from None
+
+
+def _pct(row: dict, field: str, default: float) -> float:
+    """Fractions as 0.3 or percentages as 30 / 30%."""
+    value = _num(row, field, default)
+    return value / 100 if value > 1 else value
+
+
+REINSURANCE_BASES = ("quota_share", "per_risk", "per_occurrence", "aggregate")
+
+
+def treaty_label(treaty: dict) -> str:
+    """Market shorthand: 'QS 30%', '10m xs 5m per occurrence'."""
+    if treaty["basis"] == "quota_share":
+        return f"QS {treaty.get('cession_pct', 1):.0%}"
+    layer = f"{_short(treaty.get('limit', 0))} xs {_short(treaty.get('attachment', 0))}"
+    share = treaty.get("cession_pct", 1)
+    return f"{layer} {treaty['basis'].replace('_', ' ')}" + (f" ({share:.0%})" if share < 1 else "")
+
+
+def _short(amount: float) -> str:
+    for size, suffix in ((1e9, "bn"), (1e6, "m"), (1e3, "k")):
+        if amount >= size:
+            return f"{amount / size:g}{suffix}"
+    return f"{amount:g}"
+
+
 def build_payload(
     portfolio: pl.DataFrame,
     site_overrides: pl.DataFrame | None = None,
     country_overrides: pl.DataFrame | None = None,
+    programme: tuple[list[dict], list[dict]] | None = None,
 ) -> dict:
+    """Without a programme, each property gets its own policy (deductible_pct of value, default 1%).
+    With one, properties map to its policies through their policy_ids column."""
     start = date.today()
     sites = (
         {r["property_name_or_address"]: r for r in site_overrides.iter_rows(named=True)}
@@ -49,6 +198,8 @@ def build_payload(
             "building_floors": _int_or_none(r.get("building_floors")),
             "occupancy": r["occupancy"],
         }
+        if programme and programme[0]:
+            item["policy_ids"] = split_ids(r.get("policy_ids"))
         if r["property_name_or_address"] in sites:
             o = sites[r["property_name_or_address"]]
             item["location_factor_override"] = _float_or_none(o["location_factor"])
@@ -56,6 +207,8 @@ def build_payload(
             probability = _float_or_none(o["standalone_probability_pct"])
             item["subthreshold_probability_override"] = None if probability is None else probability / 100
         inventory.append(item)
+        if programme and programme[0]:
+            continue
         ded = float(r["deductible_pct"])
         policies.append(
             {
@@ -71,7 +224,16 @@ def build_payload(
                 },
             }
         )
+    if programme and programme[0]:
+        policies = programme[0]
+        known = {p["policy_id"] for p in policies}
+        for item in inventory:
+            missing = [i for i in item["policy_ids"] if i not in known]
+            if missing:
+                raise ValueError(f"{item['property_name_or_address']} refers to unknown policy {', '.join(missing)}")
     payload = {"inventory": inventory, "insurance_policies": policies}
+    if programme and programme[1]:
+        payload["reinsurance"] = programme[1]
     if country_overrides is not None:
         event, hazard = {}, {}
         for c in country_overrides.iter_rows(named=True):
@@ -191,7 +353,10 @@ def headline(tables: dict[str, pl.DataFrame]) -> dict:
     gu = ps.filter(pl.col("layer") == "ground_up").row(0, named=True)
     insurer = ps.filter(pl.col("layer") == "insurer")
     net = insurer.row(0, named=True) if not insurer.is_empty() else None
+    reinsurer = ps.filter(pl.col("layer") == "reinsurer")
+    ceded = reinsurer.row(0, named=True) if not reinsurer.is_empty() else None
     return {
+        "reinsurer_expected_loss": ceded["expected_loss"] if ceded is not None else None,
         "expected_loss": gu["expected_loss"],
         "var_99": gu["var_99"],
         "tvar_99": gu["tvar_99"],
