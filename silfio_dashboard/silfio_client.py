@@ -16,8 +16,8 @@ import requests
 TIMEOUT_S = 600
 
 
-def load_portfolio(path: str) -> pl.DataFrame:
-    df = pl.read_csv(path)
+def load_portfolio(path) -> pl.DataFrame:
+    df = path if isinstance(path, pl.DataFrame) else pl.read_csv(path)
     if "deductible_pct" not in df.columns:
         df = df.with_columns(pl.lit(0.01).alias("deductible_pct"))
     return df
@@ -46,6 +46,46 @@ POL-001,Property war,insurance,Insurer,,2026-01-01,2027-01-01,USD,250000,5000000
 QS-01,Quota share,reinsurance,,Reinsurer A,2026-01-01,2027-01-01,USD,,,,,,quota_share,,0.3,,,,,
 XL-01,Cat XoL,reinsurance,,Reinsurer B,2026-01-01,2027-01-01,USD,,,,,,xol,per_occurrence,1,5000000,20000000,0,1,1
 """
+
+POLICY_COLUMNS = POLICY_TEMPLATE.splitlines()[0].split(",")
+POLICY_NUMBERS = (
+    "occurrence_attachment",
+    "occurrence_limit",
+    "participation_pct",
+    "cession_pct",
+    "reinsurance_attachment",
+    "reinsurance_limit",
+    "reinsurance_premium",
+    "reinstatements",
+    "reinstatement_premium_pct",
+)
+OCCUPANCIES = (
+    "airport",
+    "amenity",
+    "civic",
+    "commercial",
+    "critical_industrial",
+    "education",
+    "industrial",
+    "medical",
+    "military",
+    "religious",
+    "residential",
+    "sports_entertainment",
+    "transport",
+    "transport_hub",
+)
+
+
+def policies_frame(source=None) -> pl.DataFrame:
+    """Policies as an editable table: the template columns first, numbers as numbers."""
+    df = pl.read_csv(source, infer_schema=False) if source is not None else pl.DataFrame()
+    df = df.rename({c: _key(c) for c in df.columns})
+    columns = POLICY_COLUMNS + [c for c in df.columns if c not in POLICY_COLUMNS]
+    df = df.with_columns(pl.lit(None, dtype=pl.String).alias(c) for c in columns if c not in df.columns)
+    return df.select(columns).with_columns(
+        pl.col(c).str.replace_all(",", "").cast(pl.Float64, strict=False) for c in POLICY_NUMBERS
+    )
 
 
 def split_ids(value) -> list[str]:

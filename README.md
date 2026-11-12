@@ -80,8 +80,8 @@ implementation; the service enforces your key's limits.
 1. Select a supplied example portfolio from **Book**, or add your own CSV as
    described below. Book names are taken directly from the files in `books/`.
 2. Review the location map, available immediately with neutral markers before any
-   calculation. Hover for property details, or open **View locations** to check
-   the input data.
+   calculation. Hover for property details, or open **Edit portfolio** to check
+   or change the input data.
 3. In the **Baseline** tab, click **Run baseline** to calculate the baseline.
    Opening the dashboard or selecting a book does not run the model.
 4. Review the headline losses, map, location breakdown and **Pricing details**.
@@ -136,8 +136,10 @@ per-occurrence cat XoL. Books without a policies file get one policy per propert
 (`deductible_pct` of value, 100% participation, limit equal to the remaining value).
 
 **Upload portfolio** in the sidebar takes a properties CSV and an optional policies
-CSV, with templates for both. Uploads are private to the browser session and are
-not written to the books folder.
+CSV, with templates for both. **Edit portfolio** adds, changes or removes
+properties and policies in the dashboard; applying saves an "(edited)" copy of the
+book. Uploads and edits are private to the browser session and are not written to
+the books folder; download the edited CSVs to keep them.
 
 To use another portfolio folder, add an absolute path to your secrets file:
 

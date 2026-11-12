@@ -222,6 +222,7 @@ def money(x: float) -> str:
 
 
 UPLOADED = " (uploaded)"
+EDITED = " (edited)"
 PROPERTIES_TEMPLATE = (
     ",".join(("property_name_or_address", "city", *BOOK_COLUMNS[1:], "policy_ids")) + "\n"
     "Example office,Dubai,ARE,25.2,55.27,commercial,100000000,USD,45000,40,POL-001\n"
@@ -231,8 +232,8 @@ PROPERTIES_TEMPLATE = (
 def book_files() -> dict[str, Path]:
     """Every CSV in the books folder, by file name without the extension, then this session's uploads."""
     files = sorted(BOOKS_DIR.glob("*.csv"), key=lambda f: f.stem.lower()) if BOOKS_DIR.is_dir() else []
-    uploads = sorted((session_dir() / "books").glob("*.csv"))
-    return {f.stem: f for f in files} | {f.stem + UPLOADED: f for f in uploads}
+    session_books = sorted((session_dir() / "books").glob("*.csv"))
+    return {f.stem: f for f in files} | {f.stem: f for f in session_books}
 
 
 def policies_file(book: str, path: Path) -> Path | None:
@@ -245,6 +246,10 @@ def policies_file(book: str, path: Path) -> Path | None:
 
 def take_uploads() -> None:
     """Store newly uploaded properties/policies in this session's folder; never on shared disk."""
+    pending = st.session_state.pop("pending_book", None)
+    if pending:
+        reset_for_new_book()
+        st.session_state.book = pending
     upload = st.session_state.get("upload_properties")
     if upload is not None and st.session_state.get("taken_properties") != upload.file_id:
         st.session_state.taken_properties = upload.file_id
@@ -259,7 +264,7 @@ def take_uploads() -> None:
             folder = session_dir() / "books"
             folder.mkdir(exist_ok=True)
             stem = "".join(c if c.isalnum() or c in "-_ " else "_" for c in Path(upload.name).stem) or "portfolio"
-            (folder / f"{stem}.csv").write_bytes(upload.getvalue())
+            (folder / f"{stem}{UPLOADED}.csv").write_bytes(upload.getvalue())
             reset_for_new_book()
             st.session_state.book = stem + UPLOADED
             st.session_state.pop("upload_error", None)
@@ -319,6 +324,7 @@ policy_path = policies_file(st.session_state.book, book_path)
 if policy_path is not None and portfolio is not None:
     try:
         programme = sc.load_policies(policy_path)
+        programme = programme if programme and programme[0] else None
         sc.build_payload(portfolio, programme=programme)  # checks every property's policy_ids
     except (OSError, ValueError, pl.exceptions.PolarsError) as error:
         programme, programme_error = None, error
@@ -559,16 +565,93 @@ def assumption_lines(assumptions: dict[str, pl.DataFrame]) -> list[str]:
     return lines
 
 
-@st.dialog("Portfolio locations", width="large")
-def show_portfolio() -> None:
-    st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
-    st.dataframe(
-        sc.sort_locations(portfolio),
-        hide_index=True,
-        width="stretch",
-        column_config={"value": st.column_config.NumberColumn("Insured value (original currency)", format="%,.0f")},
+@st.dialog("Edit portfolio", width="large")
+def edit_portfolio() -> None:
+    book = st.session_state.book
+    properties = pl.read_csv(book_path)
+    if "policy_ids" not in properties.columns:
+        properties = properties.with_columns(pl.lit(None, dtype=pl.String).alias("policy_ids"))
+    tab_properties, tab_policies = st.tabs(["Properties", "Policies"])
+    with tab_properties:
+        properties_edit = st.data_editor(
+            properties.to_arrow(),
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "occupancy": st.column_config.SelectboxColumn("occupancy", options=sc.OCCUPANCIES),
+                "policy_ids": st.column_config.TextColumn("policy_ids", help="Separate several with ;"),
+            },
+            key=f"edit_properties_{book}",
+        )
+    with tab_policies:
+        policies_edit = st.data_editor(
+            sc.policies_frame(policy_path).to_arrow(),
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "contract_type": st.column_config.SelectboxColumn(options=["insurance", "reinsurance"]),
+                "deductible_type": st.column_config.SelectboxColumn(options=["excess", "franchise"]),
+                "reinsurance_structure": st.column_config.SelectboxColumn(options=["quota_share", "xol"]),
+                "reinsurance_basis": st.column_config.SelectboxColumn(
+                    options=["per_risk", "per_occurrence", "aggregate"]
+                ),
+                "reinsurance_ids": st.column_config.TextColumn(help="Separate several with ;"),
+            },
+            key=f"edit_policies_{book}",
+        )
+        st.caption("No policies: one policy per property, 1% deductible.")
+    properties_csv = pl.from_arrow(properties_edit).filter(~pl.all_horizontal(pl.all().is_null())).write_csv()
+    policies_df = pl.from_arrow(policies_edit).filter(pl.col("policy_id").is_not_null())
+    policies_csv = policies_df.write_csv() if not policies_df.is_empty() else ""
+    down_left, down_right = st.columns(2)
+    down_left.download_button(
+        "Download properties", properties_csv, "properties.csv", "text/csv", on_click="ignore", width="stretch"
     )
-    if st.button("Close", width="stretch"):
+    down_right.download_button(
+        "Download policies",
+        policies_csv or ",".join(sc.POLICY_COLUMNS),
+        "policies.csv",
+        "text/csv",
+        on_click="ignore",
+        width="stretch",
+    )
+    apply, cancel = st.columns(2)
+    if apply.button("Apply", type="primary", width="stretch"):
+        try:
+            edited = pl.read_csv(properties_csv.encode())
+            missing = [c for c in BOOK_COLUMNS if c not in edited.columns]
+            if missing:
+                raise ValueError(f"missing column(s) {', '.join(missing)}")
+            if edited.is_empty():
+                raise ValueError("add at least one property")
+            blank = [c for c in BOOK_COLUMNS if edited[c].null_count()]
+            if blank:
+                raise ValueError(f"fill in {', '.join(blank)} for every property")
+            if edited["property_name_or_address"].is_duplicated().any():
+                raise ValueError("property names must be unique")
+            check = sc.load_portfolio(edited.with_columns(pl.col("policy_ids").cast(pl.String)))
+            programme = sc.load_policies(policies_csv.encode()) if policies_csv else None
+            sc.build_payload(check, programme=programme)
+        except (ValueError, pl.exceptions.PolarsError) as error:
+            st.error(f"Not applied: {error}")
+            return
+        target = book if book_path.parent == session_dir() / "books" else book + EDITED
+        for folder, data in (("books", properties_csv), ("policies", policies_csv)):
+            path = session_dir() / folder / f"{target}.csv"
+            path.parent.mkdir(exist_ok=True)
+            if data:
+                path.write_text(data)
+            else:
+                path.unlink(missing_ok=True)
+        st.session_state.pop(f"edit_properties_{book}", None)
+        st.session_state.pop(f"edit_policies_{book}", None)
+        st.session_state.pending_book = target
+        st.rerun()
+    if cancel.button("Cancel", width="stretch"):
+        st.session_state.pop(f"edit_properties_{book}", None)
+        st.session_state.pop(f"edit_policies_{book}", None)
         st.rerun()
 
 
@@ -587,8 +670,8 @@ with st.sidebar:
             st.caption("One policy per property, 1% deductible")
         if programme_error:
             st.warning(f"Policies not used: {programme_error}")
-        if st.button("View locations", width="stretch"):
-            show_portfolio()
+        if st.button("Edit portfolio", width="stretch"):
+            edit_portfolio()
         baseline_requested = st.button("Run baseline", type="primary", width="stretch")
     with tab_scenario:
         try:
