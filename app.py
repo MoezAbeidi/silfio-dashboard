@@ -50,7 +50,8 @@ BOOK_COLUMNS = (
     "property_sqm",
     "building_floors",
 )
-API_KEY = secret("SILFIO_API_KEY") or st.session_state.get("api_key", "")
+CONFIGURED_API_KEY = secret("SILFIO_API_KEY")
+API_KEY = CONFIGURED_API_KEY or st.session_state.get("api_key", "")
 FREE_MAX_PROPERTIES = 10  # The API runs keyless baselines up to this many properties
 # "session" keeps each visitor's saved scenarios private to their browser session (for hosted use);
 # the default "file" shares them through SCENARIOS_FILE, as suits a local installation.
@@ -256,7 +257,9 @@ except (OSError, ValueError, pl.exceptions.PolarsError) as error:  # a bad file 
 
 with st.sidebar:
     st.title("Silfio")
-    if not API_KEY:
+    # Render the key box on every run unless a key is configured: a widget skipped for one run
+    # loses its value, and a sidebar that changes shape resets the tabs below it.
+    if not CONFIGURED_API_KEY:
         API_KEY = st.text_input(
             "Silfio API key",
             type="password",
@@ -473,7 +476,7 @@ def show_portfolio() -> None:
 
 
 with st.sidebar:
-    tab_book, tab_scenario = st.tabs(["Baseline", "Scenario"])
+    tab_book, tab_scenario = st.tabs(["Baseline", "Scenario"], key="sidebar_tab", on_change="rerun")
     with tab_book:
         exposure_summary = st.empty()
         st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
