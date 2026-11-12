@@ -69,9 +69,11 @@ access level.** The API reference supplied with the model describes:
 | Enterprise | Agreed limits | Subject to the agreed access configuration |
 
 Without a key, the dashboard can run a **baseline for up to 10 properties** on the
-free API, such as the `example2` book. Scenario testing and larger portfolios need
-a key; the included 58-property `example` book needs access that covers that size. Confirm the suitable access level with Silfio when arranging
-an evaluation or local implementation; the service enforces your key's limits.
+free API. The default `example` book is sized for this: ten properties split
+between high-risk and lower-risk locations. Scenario testing and larger portfolios
+need a key; the 58-property `example2` book needs access that covers that size.
+Confirm the suitable access level with Silfio when arranging an evaluation or local
+implementation; the service enforces your key's limits.
 
 ## First run
 
