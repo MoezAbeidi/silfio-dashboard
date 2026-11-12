@@ -114,7 +114,7 @@ def run(api_url: str, api_key: str, payload: dict) -> dict[str, pl.DataFrame]:
         timeout=TIMEOUT_S,
     )
     if not resp.ok:
-        raise RuntimeError(f"{endpoint} returned {resp.status_code}: {resp.text[:500]}")
+        raise RuntimeError(_error_detail(resp))
     return {name: pl.DataFrame(rows, infer_schema_length=None) for name, rows in resp.json().items()}
 
 
@@ -197,6 +197,17 @@ def headline(tables: dict[str, pl.DataFrame]) -> dict:
         "tvar_99": gu["tvar_99"],
         "net_expected_loss": net["expected_loss"] if net is not None else None,
     }
+
+
+def _error_detail(resp: requests.Response) -> str:
+    """The API's own explanation when it gives one, else the status and body."""
+    try:
+        detail = resp.json().get("detail")
+    except ValueError:
+        detail = None
+    if isinstance(detail, str) and detail:
+        return f"{detail} (HTTP {resp.status_code})"
+    return f"HTTP {resp.status_code}: {resp.text[:500]}"
 
 
 def _float_or_none(v):

@@ -68,9 +68,9 @@ access level.** The API reference supplied with the model describes:
 | Team | Larger portfolios, subject to service-wide limits | Included |
 | Enterprise | Agreed limits | Subject to the agreed access configuration |
 
-The API supports keyless free requests, but **this dashboard currently requires a
-key to start a run**. The included 58-property example needs access that covers
-that portfolio size. Confirm the suitable access level with Silfio when arranging
+Without a key, the dashboard can run a **baseline for up to 10 properties** on the
+free API, such as the `example2` book. Scenario testing and larger portfolios need
+a key; the included 58-property `example` book needs access that covers that size. Confirm the suitable access level with Silfio when arranging
 an evaluation or local implementation; the service enforces your key's limits.
 
 ## First run

@@ -50,6 +50,7 @@ BOOK_COLUMNS = (
     "building_floors",
 )
 API_KEY = secret("SILFIO_API_KEY") or st.session_state.get("api_key", "")
+FREE_MAX_PROPERTIES = 10  # The API runs keyless baselines up to this many properties
 
 
 def run_model(payload: dict) -> dict[str, pl.DataFrame]:
@@ -244,7 +245,13 @@ except (OSError, ValueError, pl.exceptions.PolarsError) as error:  # a bad file 
 with st.sidebar:
     st.title("Silfio")
     if not API_KEY:
-        API_KEY = st.text_input("Silfio API key", type="password", key="api_key")
+        API_KEY = st.text_input(
+            "Silfio API key",
+            type="password",
+            key="api_key",
+            help=f"Optional for a baseline of up to {FREE_MAX_PROPERTIES} properties. "
+            "Scenario testing and larger portfolios need a key.",
+        )
     st.selectbox(
         "Book",
         list(books),
@@ -471,8 +478,16 @@ details_area = st.container()
 
 if baseline_requested or scenario_requested:
     st.session_state.pop("run_error", None)
-    if not API_KEY:
-        st.session_state.run_error = "Enter a Silfio API key in the sidebar, then try again."
+    if not API_KEY and scenario_requested:
+        st.session_state.run_error = (
+            "Scenario testing needs a Silfio API key with Professional access or above. "
+            "Enter one in the sidebar, then press Run scenario."
+        )
+    elif not API_KEY and portfolio.height > FREE_MAX_PROPERTIES:
+        st.session_state.run_error = (
+            f"This book has {portfolio.height} properties. Without an API key, baselines are limited to "
+            f"{FREE_MAX_PROPERTIES} properties. Enter a Silfio API key in the sidebar, or choose a smaller book."
+        )
     else:
         theatres_version.clear()
         try:
