@@ -1,0 +1,7 @@
+property_name_or_address,city,iso3,latitude,longitude,occupancy,value,currency,property_sqm,building_floors
+Dubai office tower,Dubai,ARE,25.2,55.27,commercial,100000000,USD,45000,40
+Jebel Ali logistics hub,Jebel Ali,ARE,25.01,55.06,transport_hub,60000000,USD,60000,2
+Tokyo business centre,Tokyo,JPN,35.676,139.65,commercial,160000000,USD,50000,35
+Warsaw office building,Warsaw,POL,52.23,21.012,commercial,65000000,USD,30000,22
+Dublin office building,Dublin,IRL,53.35,-6.26,commercial,75000000,USD,25000,12
+Sydney business centre,Sydney,AUS,-33.869,151.209,commercial,130000000,USD,42000,30
