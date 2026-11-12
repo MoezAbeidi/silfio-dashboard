@@ -6,3 +6,10 @@ __pycache__/
 static/
 .idea/
 .streamlit/theatres-version
+
+# Local dev tooling and hosting config (not part of the client package)
+.pre-commit-config.yaml
+requirements-dev.txt
+pyproject.toml
+railway.toml
+.python-version
