@@ -112,7 +112,6 @@ without changing the code. Use one row per property:
 | `value`, `currency` | Yes | Insured property value and its currency code. |
 | `property_sqm` | Yes | Building area in square metres. |
 | `building_floors` | Yes | Number of building floors. |
-| `deductible_pct` | No | Per-occurrence deductible as a fraction of value; defaults to `0.01` (1%). Used only when the book has no policies file. |
 | `policy_ids` | No | Policies covering the property, separated by `;`. Used with a policies file. |
 
 Use numeric values without currency symbols or thousands separators, and save as
@@ -131,8 +130,7 @@ format as the Silfio API and engine CSV: one row per insurance policy or
 reinsurance treaty (`contract_type`), properties mapped to policies through
 `policy_ids`, and policies mapped to treaties through `reinsurance_ids`. The
 `example` book includes a small programme: two policies, a 30% quota share and a
-per-occurrence cat XoL. Books without a policies file get one policy per property
-(`deductible_pct` of value, 100% participation, limit equal to the remaining value).
+per-occurrence cat XoL. Books without policies are run ground-up only.
 
 **Upload portfolio** in the sidebar takes a properties CSV and an optional policies
 CSV, with templates for both. **Edit portfolio** adds, changes or removes
@@ -158,7 +156,7 @@ view. Scenario changes are shown relative to the baseline.
 | **Ground-up expected loss** | Average annual property damage before insurance terms. |
 | **Ground-up VaR 99%** | Annual aggregate loss at the 99th percentile, commonly described as a 1-in-100 loss. |
 | **Ground-up TVaR 99%** | Average annual loss within the worst 1% of simulated years. |
-| **Insurer net expected loss** | Average annual loss retained by the insurer after policy terms and reinsurance. |
+| **Insurer net expected loss** | Average annual loss retained by the insurer after policy terms and reinsurance; shown when the book has policies. |
 | **Reinsurer expected loss** | Average annual loss ceded to the treaties; shown when the book has reinsurance. |
 
 Expected loss is a loss estimate, not a quoted premium or a price including

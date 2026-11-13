@@ -17,10 +17,7 @@ TIMEOUT_S = 600
 
 
 def load_portfolio(path) -> pl.DataFrame:
-    df = path if isinstance(path, pl.DataFrame) else pl.read_csv(path)
-    if "deductible_pct" not in df.columns:
-        df = df.with_columns(pl.lit(0.01).alias("deductible_pct"))
-    return df
+    return path if isinstance(path, pl.DataFrame) else pl.read_csv(path)
 
 
 # Policies follow the Silfio API / engine CSV: one file holds insurance policies and reinsurance
@@ -215,20 +212,19 @@ def build_payload(
     country_overrides: pl.DataFrame | None = None,
     programme: tuple[list[dict], list[dict]] | None = None,
 ) -> dict:
-    """Without a programme, each property gets its own policy (deductible_pct of value, default 1%).
-    With one, properties map to its policies through their policy_ids column."""
-    start = date.today()
+    """Without a programme the run is ground-up only; with one, properties map to its
+    policies through their policy_ids column."""
     sites = (
         {r["property_name_or_address"]: r for r in site_overrides.iter_rows(named=True)}
         if site_overrides is not None
         else {}
     )
-    inventory, policies = [], []
-    for i, r in enumerate(portfolio.iter_rows(named=True)):
-        policy_id = f"P-{i + 1}"
+    has_policies = bool(programme and programme[0])
+    inventory = []
+    for r in portfolio.iter_rows(named=True):
         item = {
             "property_name_or_address": r["property_name_or_address"],
-            "policy_ids": [policy_id],
+            "policy_ids": split_ids(r.get("policy_ids")) if has_policies else [],
             "value": float(r["value"]),
             "currency": r["currency"],
             "latitude": float(r["latitude"]),
@@ -238,8 +234,6 @@ def build_payload(
             "building_floors": _int_or_none(r.get("building_floors")),
             "occupancy": r["occupancy"],
         }
-        if programme and programme[0]:
-            item["policy_ids"] = split_ids(r.get("policy_ids"))
         if r["property_name_or_address"] in sites:
             o = sites[r["property_name_or_address"]]
             item["location_factor_override"] = _float_or_none(o["location_factor"])
@@ -247,25 +241,8 @@ def build_payload(
             probability = _float_or_none(o["standalone_probability_pct"])
             item["subthreshold_probability_override"] = None if probability is None else probability / 100
         inventory.append(item)
-        if programme and programme[0]:
-            continue
-        ded = float(r["deductible_pct"])
-        policies.append(
-            {
-                "policy_id": policy_id,
-                "inception_date": start.isoformat(),
-                "expiry_date": (start + timedelta(days=365)).isoformat(),
-                "currency": r["currency"],
-                "insurance": {
-                    "occurrence_attachment": ded * float(r["value"]),
-                    "occurrence_limit": (1 - ded) * float(r["value"]),
-                    "deductible_type": "excess",
-                    "participation_pct": 1.0,
-                },
-            }
-        )
-    if programme and programme[0]:
-        policies = programme[0]
+    policies = programme[0] if has_policies else []
+    if has_policies:
         known = {p["policy_id"] for p in policies}
         for item in inventory:
             missing = [i for i in item["policy_ids"] if i not in known]

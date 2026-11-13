@@ -601,7 +601,7 @@ def edit_portfolio() -> None:
             },
             key=f"edit_policies_{book}",
         )
-        st.caption("No policies: one policy per property, 1% deductible.")
+        st.caption("No policies: ground-up only.")
     properties_csv = pl.from_arrow(properties_edit).filter(~pl.all_horizontal(pl.all().is_null())).write_csv()
     policies_df = pl.from_arrow(policies_edit).filter(pl.col("policy_id").is_not_null())
     policies_csv = policies_df.write_csv() if not policies_df.is_empty() else ""
@@ -667,7 +667,7 @@ with st.sidebar:
                 + (" · " + "; ".join(sc.treaty_label(t) for t in treaties) if treaties else "")
             )
         else:
-            st.caption("One policy per property, 1% deductible")
+            st.caption("No policies: ground-up only")
         if programme_error:
             st.warning(f"Policies not used: {programme_error}")
         if st.button("Edit portfolio", width="stretch"):
@@ -833,8 +833,9 @@ with summary_area:
         ("Ground-up expected loss", "expected_loss"),
         ("Ground-up VaR 99%", "var_99"),
         ("Ground-up TVaR 99%", "tvar_99"),
-        ("Insurer net expected loss", "net_expected_loss"),
     ]
+    if kpi.get("net_expected_loss") is not None:
+        metrics.append(("Insurer net expected loss", "net_expected_loss"))
     if treaties or (kpi.get("reinsurer_expected_loss") or 0) > 0:
         metrics.append(("Reinsurer expected loss", "reinsurer_expected_loss"))
     for col, (label, key) in zip(st.columns(len(metrics)), metrics):
