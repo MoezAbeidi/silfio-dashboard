@@ -471,6 +471,42 @@ def pricing_details(portfolio: pl.DataFrame, tables: dict[str, pl.DataFrame]) ->
     ).drop("property_value", "subthreshold_hit_percentage")
 
 
+def policy_details(
+    tables: dict[str, pl.DataFrame], programme: tuple[list[dict], list[dict]] | None, sites: pl.DataFrame
+) -> pl.DataFrame | None:
+    """One row per policy: its terms, covered value and the API's expected waterfall."""
+    summary = tables.get("policy_summary", pl.DataFrame())
+    if not programme or not programme[0] or "policy_id" not in summary.columns:
+        return None
+    covered = (
+        sites.select("value_usd", pl.col("policy_ids").cast(pl.String).str.split(";").alias("policy_id"))
+        .explode("policy_id")
+        .with_columns(pl.col("policy_id").str.strip_chars())
+        .group_by("policy_id")
+        .agg(pl.col("value_usd").sum().alias("covered_value_usd"))
+        if "policy_ids" in sites.columns
+        else pl.DataFrame(schema={"policy_id": pl.String, "covered_value_usd": pl.Float64})
+    )
+    terms = pl.DataFrame(
+        [
+            {
+                "policy_id": p["policy_id"],
+                "policy_name": p.get("policy_name"),
+                "currency": p["currency"],
+                "deductible": p["insurance"]["occurrence_attachment"],
+                "limit": p["insurance"]["occurrence_limit"],
+                "participation": p["insurance"]["participation_pct"],
+                "treaties": "; ".join(p.get("reinsurance_ids", [])) or None,
+            }
+            for p in programme[0]
+        ],
+        schema_overrides={"policy_name": pl.String, "treaties": pl.String},
+    )
+    return terms.join(covered, on="policy_id", how="left").join(
+        summary.drop("insurer", strict=False), on="policy_id", how="left"
+    )
+
+
 @lru_cache(maxsize=1)
 def country_regions() -> dict[str, str]:
     """Bundled snapshot of Silfio's portfolio ISO3-to-region classification."""

@@ -720,8 +720,7 @@ if baseline_requested or scenario_requested:
     st.session_state.pop("run_error", None)
     if not API_KEY and scenario_requested:
         st.session_state.run_error = (
-            "Scenario testing needs a Silfio API key with Professional access or above. "
-            "Enter one in the sidebar, then press Run scenario."
+            "Scenario testing needs a Silfio API key. Enter one in the sidebar, then press Run scenario."
         )
     elif not API_KEY and portfolio.height > FREE_MAX_PROPERTIES:
         st.session_state.run_error = (
@@ -986,6 +985,59 @@ with details_area:
             "property_name_or_address": "Property",
         },
     )
+
+    policies = sc.policy_details(tables, programme, sites)
+    if policies is not None:
+        st.subheader("Policy details")
+        st.dataframe(
+            policies,
+            hide_index=True,
+            width="stretch",
+            column_order=[
+                "policy_id",
+                "policy_name",
+                "n_properties",
+                "covered_value_usd",
+                "currency",
+                "deductible",
+                "limit",
+                "participation",
+                "treaties",
+                "attachment_breach_frequency",
+                "expected_ground_up_loss",
+                "expected_layer_loss",
+                "expected_insurer_gross",
+                "expected_ri_recovery",
+                "expected_reinstatement_premium",
+                "expected_insurer_net_loss",
+                "insurer_net_tvar_99",
+                "driving_country",
+                "driving_country_share",
+            ],
+            column_config={
+                "policy_id": "Policy",
+                "policy_name": "Name",
+                "n_properties": st.column_config.NumberColumn("Properties", format="%d"),
+                "covered_value_usd": st.column_config.NumberColumn("Insured value (USD)", format="$%,.0f"),
+                "currency": "Currency",
+                "deductible": st.column_config.NumberColumn("Deductible", format="%,.0f"),
+                "limit": st.column_config.NumberColumn("Limit", format="%,.0f"),
+                "participation": st.column_config.NumberColumn("Participation", format="percent"),
+                "treaties": "Treaties",
+                "attachment_breach_frequency": st.column_config.NumberColumn("P(attach)", format="percent"),
+                "expected_ground_up_loss": st.column_config.NumberColumn("Ground-up EL (USD)", format="$%,.0f"),
+                "expected_layer_loss": st.column_config.NumberColumn("Layer EL (USD)", format="$%,.0f"),
+                "expected_insurer_gross": st.column_config.NumberColumn("Insurer gross EL (USD)", format="$%,.0f"),
+                "expected_ri_recovery": st.column_config.NumberColumn("RI recovery (USD)", format="$%,.0f"),
+                "expected_reinstatement_premium": st.column_config.NumberColumn(
+                    "Reinstatement premium (USD)", format="$%,.0f"
+                ),
+                "expected_insurer_net_loss": st.column_config.NumberColumn("Insurer net EL (USD)", format="$%,.0f"),
+                "insurer_net_tvar_99": st.column_config.NumberColumn("Net TVaR 99% (USD)", format="$%,.0f"),
+                "driving_country": "Driving country",
+                "driving_country_share": st.column_config.NumberColumn("Driving share", format="percent"),
+            },
+        )
 
     st.subheader("Pricing details")
     if "rating_factors" not in tables:
