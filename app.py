@@ -188,10 +188,12 @@ def ramp(values: np.ndarray, bounds: tuple[float, float], palette: np.ndarray, a
     return colours.tolist()
 
 
-def site_theatre_share(sites: pl.DataFrame, centres: pl.DataFrame) -> np.ndarray:
+def site_theatre_share(sites: pl.DataFrame, centres: pl.DataFrame | None) -> np.ndarray:
     """Share of the country's fighting in each site's theatre: the nearest centre in
     its own country, as the model assigns it."""
     share = np.full(len(sites), np.nan)
+    if centres is None:
+        return share
     for iso3 in sites["iso3"].unique():
         idx = np.flatnonzero((sites["iso3"] == iso3).to_numpy())
         c = centres.filter(pl.col("iso3") == iso3)
@@ -727,7 +729,6 @@ if baseline_requested or scenario_requested:
             f"{FREE_MAX_PROPERTIES} properties. Enter a Silfio API key in the sidebar, or choose a smaller book."
         )
     else:
-        theatres_version.clear()
         try:
             if baseline_requested:
                 baseline = run_model(sc.build_payload(portfolio, programme=programme))
@@ -819,7 +820,12 @@ with summary_area:
 
     left, right = st.columns([3, 1])
     view = left.radio("View", list(views), horizontal=True, label_visibility="collapsed", key="view")
-    show_theatres = right.toggle("Theatres")
+    show_theatres = right.toggle(
+        "Theatres",
+        help="The theatre split of each country's activity. All three splits feed the calculation: "
+        "the new-conflict split where no conflict is under way, the ongoing-conflict split where one is, "
+        "and the sub-threshold split for incidents below the conflict threshold.",
+    )
     tables = views[view]
     scenario_shares = tables.get("scenario_theatre_shares") if view == "Scenario" else None
     if view == "Scenario" and scenario_shares is None:
@@ -849,34 +855,36 @@ with summary_area:
     )
 
 ongoing_view = subthreshold_view = False
-try:
-    version = theatres_version()
-    has_ongoing = fetch_theatres(countries, version)[1]["ongoing_share"].is_not_null().any()
-    if show_theatres:
-        choices = ["New conflict"] + (["Ongoing conflicts"] if has_ongoing else []) + ["Sub-threshold"]
-        split = right.selectbox("Theatre split", choices)
-        ongoing_view, subthreshold_view = split == "Ongoing conflicts", split == "Sub-threshold"
-    polygons, share_labels, centres = theatre_layers(
-        countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
-    )
-    polygons_file = HERE / polygons.removeprefix("app/")
+
+
+def theatre_data():
+    """Theatre polygons, labels and centres; empty when the API cannot supply them."""
+    global ongoing_view, subthreshold_view
     try:
-        os.utime(polygons_file)  # mark as in use, so other sessions' cleanup keeps it
-    except FileNotFoundError:
-        pass
-    if not polygons_file.exists():  # file cleared since it was cached
-        theatre_layers.clear()
-        polygons, share_labels, centres = theatre_layers(
-            countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
-        )
-except Exception as error:  # the map still works without theatres
-    polygons, share_labels, centres = (
-        None,
-        [],
-        pl.DataFrame(schema={"iso3": pl.String, "shown": pl.Float64, "latitude": pl.Float64, "longitude": pl.Float64}),
-    )
-    if show_theatres:
-        summary_area.warning(f"Theatres unavailable: {error}")
+        version = theatres_version()
+        if show_theatres:
+            has_ongoing = fetch_theatres(countries, version)[1]["ongoing_share"].is_not_null().any()
+            choices = ["New conflict"] + (["Ongoing conflicts"] if has_ongoing else []) + ["Sub-threshold"]
+            split = right.selectbox("Theatre split", choices)
+            ongoing_view, subthreshold_view = split == "Ongoing conflicts", split == "Sub-threshold"
+        found = theatre_layers(countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view)
+        polygons_file = HERE / found[0].removeprefix("app/")
+        try:
+            os.utime(polygons_file)  # mark as in use, so other sessions' cleanup keeps it
+        except FileNotFoundError:
+            theatre_layers.clear()  # file cleared since it was cached
+            found = theatre_layers(
+                countries, version, ongoing_view, LABEL_MIN_SHARE, scenario_shares, subthreshold_view
+            )
+        return found
+    except Exception as error:  # the map still works without theatres
+        if show_theatres:
+            summary_area.warning(f"Theatres unavailable: {error}")
+        return None, [], None
+
+
+# With theatres off, draw the map first and fetch theatre shares for the tables afterwards.
+polygons, share_labels, centres = theatre_data() if show_theatres else (None, [], None)
 sites = sc.site_results(portfolio, tables)
 sites = sites.with_columns(pl.Series("theatre_share", site_theatre_share(sites, centres)))
 theatre_measure = "sub-threshold incidents" if subthreshold_view else "fighting"
@@ -954,6 +962,9 @@ map_area.pydeck_chart(
     ),
     height=560,
 )
+if not show_theatres:
+    centres = theatre_data()[2]
+    sites = sites.with_columns(pl.Series("theatre_share", site_theatre_share(sites, centres)))
 caption = "Size: insured value. Colour: loss cost, 0.1–200+ bps."
 if show_theatres:
     caption += f" Shading: theatre share of {theatre_measure}."
