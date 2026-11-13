@@ -112,7 +112,6 @@ without changing the code. Use one row per property:
 | `value`, `currency` | Yes | Insured property value and its currency code. |
 | `property_sqm` | Yes | Building area in square metres. |
 | `building_floors` | Yes | Number of building floors. |
-| `city` | No | Additional location information. |
 | `deductible_pct` | No | Per-occurrence deductible as a fraction of value; defaults to `0.01` (1%). Used only when the book has no policies file. |
 | `policy_ids` | No | Policies covering the property, separated by `;`. Used with a policies file. |
 

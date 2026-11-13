@@ -224,8 +224,8 @@ def money(x: float) -> str:
 UPLOADED = " (uploaded)"
 EDITED = " (edited)"
 PROPERTIES_TEMPLATE = (
-    ",".join(("property_name_or_address", "city", *BOOK_COLUMNS[1:], "policy_ids")) + "\n"
-    "Example office,Dubai,ARE,25.2,55.27,commercial,100000000,USD,45000,40,POL-001\n"
+    ",".join((*BOOK_COLUMNS, "policy_ids")) + "\n"
+    "Example office,ARE,25.2,55.27,commercial,100000000,USD,45000,40,POL-001\n"
 )
 
 
