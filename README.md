@@ -6,13 +6,11 @@ the assumptions behind each property's loss, and compare scenarios with a model
 baseline.
 
 Silfio models conflict occurrence, severity, the geographic distribution of damage
-and building vulnerability, including sub-threshold violence. This dashboard
-provides a focused interface to those results for portfolio review and underwriting
-discussions.
+and building vulnerability. This dashboard provides a focused interface to those 
+results for portfolio review and underwriting discussions.
 
 **The dashboard runs on your computer; model calculations run through the Silfio
 API.** An internet connection and API access are required to calculate results.
-You do not need to install the main Silfio modelling repository.
 
 ## Quick setup
 
