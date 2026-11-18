@@ -332,25 +332,9 @@ if policy_path is not None and portfolio is not None:
         programme, programme_error = None, error
 treaties = programme[1] if programme else []
 
-with st.sidebar:
-    st.title("Silfio")
-    # Render the key box on every run unless a key is configured: a widget skipped for one run
-    # loses its value, and a sidebar that changes shape resets the tabs below it.
-    if not CONFIGURED_API_KEY:
-        API_KEY = st.text_input(
-            "Silfio API key",
-            type="password",
-            key="api_key",
-            help=f"Optional for a baseline of up to {FREE_MAX_PROPERTIES} properties. "
-            "Scenario testing and larger portfolios need a key.",
-        )
-    st.selectbox(
-        "Book",
-        list(books),
-        key="book",
-        on_change=reset_for_new_book,
-    )
-    with st.expander("Upload portfolio"):
+
+def portfolio_upload() -> None:
+    with st.expander("Import portfolio from CSV"):
         st.file_uploader("Properties CSV", type="csv", key="upload_properties")
         st.file_uploader("Policies CSV (optional)", type="csv", key="upload_policies")
         st.caption("Map properties to policies with policy_ids; policies to treaties with reinsurance_ids.")
@@ -372,7 +356,30 @@ with st.sidebar:
         )
         if st.session_state.get("upload_error"):
             st.error(st.session_state.upload_error)
+
+
+with st.sidebar:
+    st.title("Silfio")
+    # Render the key box on every run unless a key is configured: a widget skipped for one run
+    # loses its value, and a sidebar that changes shape resets the tabs below it.
+    if not CONFIGURED_API_KEY:
+        API_KEY = st.text_input(
+            "Silfio API key",
+            type="password",
+            key="api_key",
+            help=f"Optional for a baseline of up to {FREE_MAX_PROPERTIES} properties. "
+            "Scenario testing and larger portfolios need a key.",
+        )
+    st.selectbox(
+        "Book",
+        list(books),
+        key="book",
+        on_change=reset_for_new_book,
+    )
+
 if portfolio is None:
+    with st.sidebar:
+        portfolio_upload()
     st.error(f"Could not read {book_path.name}: {book_error}")
     st.stop()
 countries = tuple(sorted(portfolio["iso3"].unique()))
@@ -660,6 +667,8 @@ def edit_portfolio() -> None:
 with st.sidebar:
     tab_book, tab_scenario = st.tabs(["Baseline", "Scenario"], key="sidebar_tab", on_change="rerun")
     with tab_book:
+        if st.button("Edit portfolio", width="stretch"):
+            edit_portfolio()
         exposure_summary = st.empty()
         st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
         if programme:
@@ -672,37 +681,16 @@ with st.sidebar:
             st.caption("No policies: ground-up only")
         if programme_error:
             st.warning(f"Policies not used: {programme_error}")
-        if st.button("Edit portfolio", width="stretch"):
-            edit_portfolio()
         baseline_requested = st.button("Run baseline", type="primary", width="stretch")
+        portfolio_upload()
     with tab_scenario:
-        try:
-            saved_scenarios = scenario_store.load(scenarios_file())
-        except (OSError, ValueError) as error:
-            st.warning(f"Could not read saved scenarios: {error}")
-            saved_scenarios = {}
-        if saved_scenarios:
-            saved_name = st.selectbox("Saved scenarios", sorted(saved_scenarios))
-            if st.button("Load saved scenario", width="stretch"):
-                st.session_state.assumptions = scenario_store.apply(
-                    saved_scenarios[saved_name], st.session_state.assumptions
-                )
-                for key in ("countries_editor", "sites_editor", "scenario_results", "run_error"):
-                    st.session_state.pop(key, None)
-                st.session_state.scenario_save_name = saved_name
-                st.session_state.view = "Baseline"
-                st.rerun()
-        elif not DOWNLOAD_SCENARIOS:
-            st.caption("No saved scenarios yet.")
-        if DOWNLOAD_SCENARIOS:
-            scenario_upload()
+        if st.button("Edit assumptions", width="stretch"):
+            edit_assumptions()
         lines = assumption_lines(st.session_state.assumptions)
         if lines:
             st.markdown("\n".join(f"- {line}" for line in lines))
         else:
             st.caption("No overrides set.")
-        if st.button("Edit assumptions", width="stretch"):
-            edit_assumptions()
         if lines and st.button("Clear scenario", width="stretch"):
             del st.session_state.assumptions
             st.session_state.pop("scenario_results", None)
@@ -711,6 +699,28 @@ with st.sidebar:
 
         scenario_requested = st.button("Run scenario", type="primary", width="stretch")
         scenario_status = st.empty()
+        with st.expander("Load an existing scenario"):
+            try:
+                saved_scenarios = scenario_store.load(scenarios_file())
+            except (OSError, ValueError) as error:
+                st.warning(f"Could not read saved scenarios: {error}")
+                saved_scenarios = {}
+            if saved_scenarios:
+                saved_name = st.selectbox("Saved scenarios", sorted(saved_scenarios))
+                if st.button("Load saved scenario", width="stretch"):
+                    st.session_state.assumptions = scenario_store.apply(
+                        saved_scenarios[saved_name], st.session_state.assumptions
+                    )
+                    for key in ("countries_editor", "sites_editor", "scenario_results", "run_error"):
+                        st.session_state.pop(key, None)
+                    st.session_state.scenario_save_name = saved_name
+                    st.session_state.view = "Baseline"
+                    st.rerun()
+            elif not DOWNLOAD_SCENARIOS:
+                st.caption("No saved scenarios yet.")
+            if DOWNLOAD_SCENARIOS:
+                scenario_upload()
+
 # Reserve the same map position on every rerun so React keeps its viewport alive.
 summary_area = st.container()
 map_area = st.container()  # Do not emit an empty element that unmounts the map during a run.
