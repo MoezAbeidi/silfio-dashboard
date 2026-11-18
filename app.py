@@ -1093,9 +1093,16 @@ with details_area:
             "occupancy_factor": st.column_config.NumberColumn("Occupancy relativity", format="%.3f ×"),
             "hit_frequency": st.column_config.NumberColumn("P(damage)", format="percent"),
             "subthreshold_share": st.column_config.NumberColumn(
-                "Sub-threshold share",
+                "Sub-threshold share ⓘ",
                 format="percent",
-                help="Share of damage years attributable to sub-threshold events",
+                help=(
+                    "Share of damage years attributable to events grouped here as sub-threshold: "
+                    "violence below UCDP's death threshold, "
+                    "or fighting between two organised non-state armed groups. "
+                    "UCDP classifies the latter separately as non-state conflict when that threshold is met; "
+                    "state-based armed conflict requires at least one government party. "
+                    "[UCDP definitions](https://www.uu.se/en/department/peace-and-conflict-research/research/ucdp/ucdp-definitions)"
+                ),
             ),
             "vulnerability_if_hit": st.column_config.NumberColumn("Vulnerability if hit", format="percent"),
             "expected_ground_up_loss": st.column_config.NumberColumn("Expected loss (USD)", format="$%,.0f"),
