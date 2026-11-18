@@ -715,6 +715,7 @@ with st.sidebar:
 summary_area = st.container()
 map_area = st.container()  # Do not emit an empty element that unmounts the map during a run.
 details_area = st.container()
+st.caption("Data is processed on request and is not stored.")
 
 if baseline_requested or scenario_requested:
     st.session_state.pop("run_error", None)
