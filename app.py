@@ -22,6 +22,11 @@ LAST_VERSION = HERE / ".streamlit" / "theatres-version"
 PALETTE = np.array(
     [[11, 61, 145], [0, 100, 200], [156, 195, 238], [246, 205, 184], [235, 104, 52], [165, 48, 12]], dtype=float
 )
+# Loss cost, as in the model overview deck: blue below about 1 bps, orange above about 2 bps
+SITE_PALETTE = np.array(
+    [[42, 107, 196], [141, 184, 234], [220, 214, 214], [242, 162, 127], [226, 100, 58], [168, 52, 26]], dtype=float
+)
+SITE_STOPS = np.array([0.0, 0.16, 0.30, 0.50, 0.78, 1.0])
 BPS_RANGE = (0.1, 200.0)
 SHARE_RANGE = (0.001, 0.5)
 LABEL_MIN_SHARE = 0.05
@@ -47,9 +52,9 @@ BOOK_COLUMNS = (
     "occupancy",
     "value",
     "currency",
-    "property_sqm",
-    "building_floors",
 )
+# Optional: the API estimates any building size left blank from local building stock
+BUILDING_COLUMNS = ("property_sqm", "building_floors", "building_height_m")
 CONFIGURED_API_KEY = secret("SILFIO_API_KEY")
 API_KEY = CONFIGURED_API_KEY or st.session_state.get("api_key", "")
 FREE_MAX_PROPERTIES = 10  # The API runs keyless baselines up to this many properties
@@ -175,12 +180,18 @@ def theatre_layers(
     return f"app/static/{name}", labels, centres
 
 
-def ramp(values: np.ndarray, bounds: tuple[float, float], palette: np.ndarray, alpha: int) -> list[list[int]]:
-    """Log-scale colour ramp over `palette`, clipped to `bounds`."""
+def ramp(
+    values: np.ndarray, bounds: tuple[float, float], palette: np.ndarray, alpha: int, stops: np.ndarray | None = None
+) -> list[list[int]]:
+    """Log-scale colour ramp over `palette`, clipped to `bounds`, with optional colour positions."""
     missing = ~np.isfinite(values)
     values = np.where(missing, bounds[0], values)
     lo, hi = np.log10(bounds)
-    t = (np.log10(np.clip(values, *bounds)) - lo) / (hi - lo) * (len(palette) - 1)
+    t = (np.log10(np.clip(values, *bounds)) - lo) / (hi - lo)
+    if stops is not None:
+        t = np.interp(t, stops, np.arange(len(palette)))
+    else:
+        t = t * (len(palette) - 1)
     i = np.minimum(t.astype(int), len(palette) - 2)
     rgb = palette[i] + (palette[i + 1] - palette[i]) * (t - i)[:, None]
     colours = np.column_stack([rgb.round(), np.full(len(values), alpha)]).astype(int)
@@ -226,8 +237,8 @@ def money(x: float) -> str:
 UPLOADED = " (uploaded)"
 EDITED = " (edited)"
 PROPERTIES_TEMPLATE = (
-    ",".join((*BOOK_COLUMNS, "policy_ids")) + "\n"
-    "Example office,ARE,25.2,55.27,commercial,100000000,USD,45000,40,POL-001\n"
+    ",".join((*BOOK_COLUMNS, *BUILDING_COLUMNS, "policy_ids")) + "\n"
+    "Example office,ARE,25.2,55.27,commercial,100000000,USD,45000,40,,POL-001\n"
 )
 
 
@@ -338,6 +349,10 @@ def portfolio_upload() -> None:
         st.file_uploader("Properties CSV", type="csv", key="upload_properties")
         st.file_uploader("Policies CSV (optional)", type="csv", key="upload_policies")
         st.caption("Map properties to policies with policy_ids; policies to treaties with reinsurance_ids.")
+        st.caption(
+            "property_sqm, building_floors and building_height_m are optional. "
+            "Leave them blank and Silfio estimates the building's size from local buildings."
+        )
         st.download_button(
             "Properties template",
             PROPERTIES_TEMPLATE,
@@ -588,8 +603,26 @@ def edit_portfolio() -> None:
             hide_index=True,
             width="stretch",
             column_config={
-                "occupancy": st.column_config.SelectboxColumn("occupancy", options=sc.OCCUPANCIES),
+                "occupancy": st.column_config.SelectboxColumn(
+                    "occupancy",
+                    options=sc.OCCUPANCIES,
+                    help="critical_industrial: refineries, power plants, oil and gas terminals, petrochemicals, "
+                    "desalination, key fabs or defence production. Ordinary factories are industrial.",
+                ),
+                "iso3": st.column_config.SelectboxColumn(
+                    "iso3",
+                    options=list(sc.country_names()),
+                    format_func=lambda c: f"{sc.country_names().get(c, c)} ({c})",
+                    help="Country. Type to search by name.",
+                ),
                 "policy_ids": st.column_config.TextColumn("policy_ids", help="Separate several with ;"),
+                **{
+                    c: st.column_config.NumberColumn(
+                        f"{c} (optional)", help="Leave blank to estimate from local buildings."
+                    )
+                    for c in BUILDING_COLUMNS
+                    if c in properties.columns
+                },
             },
             key=f"edit_properties_{book}",
         )
@@ -913,7 +946,7 @@ site_data = [
         sites["longitude"],
         sites["latitude"],
         radius,
-        ramp(sites["bps"].to_numpy(), BPS_RANGE, PALETTE, alpha=220),
+        ramp(sites["bps"].to_numpy(), BPS_RANGE, SITE_PALETTE, alpha=220, stops=SITE_STOPS),
         sites["bps"],
         sites["theatre_share"],
     )

@@ -106,10 +106,11 @@ without changing the code. Use one row per property:
 | `property_name_or_address` | Yes | Unique property name or address; also used to match saved scenario overrides. |
 | `iso3` | Yes | Three-letter country code, for example `GBR` or `USA`. |
 | `latitude`, `longitude` | Yes | Property coordinates in decimal degrees. |
-| `occupancy` | Yes | Silfio occupancy class; examples include `commercial`, `critical_industrial` and `transport_hub`. |
+| `occupancy` | Yes | Silfio occupancy class; examples include `commercial`, `critical_industrial` and `transport_hub`. Use `critical_industrial` only for sites a party would target for strategic effect: refineries, power plants, oil and gas terminals, petrochemical plants, desalination, and key fabs or defence production. Ordinary factories and warehouses are `industrial`. |
 | `value`, `currency` | Yes | Insured property value and its currency code. |
-| `property_sqm` | Yes | Building area in square metres. |
-| `building_floors` | Yes | Number of building floors. |
+| `property_sqm` | No | Building area in square metres. Estimated from local buildings if blank. |
+| `building_floors` | No | Number of building floors. Estimated if blank. |
+| `building_height_m` | No | Building height in metres. Used instead of floors if both are given. |
 | `policy_ids` | No | Policies covering the property, separated by `;`. Used with a policies file. |
 
 Use numeric values without currency symbols or thousands separators, and save as

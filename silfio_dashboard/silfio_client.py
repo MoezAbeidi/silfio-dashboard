@@ -230,8 +230,9 @@ def build_payload(
             "latitude": float(r["latitude"]),
             "longitude": float(r["longitude"]),
             "iso3": r["iso3"],
-            "property_sqm": float(r["property_sqm"]),
+            "property_sqm": _float_or_none(r.get("property_sqm")),
             "building_floors": _int_or_none(r.get("building_floors")),
+            "building_height_m": _float_or_none(r.get("building_height_m")),
             "occupancy": r["occupancy"],
         }
         if r["property_name_or_address"] in sites:
@@ -510,7 +511,18 @@ def policy_details(
 @lru_cache(maxsize=1)
 def country_regions() -> dict[str, str]:
     """Bundled snapshot of Silfio's portfolio ISO3-to-region classification."""
-    return dict(pl.read_csv(Path(__file__).parent / "data" / "country_regions.csv").iter_rows())
+    return dict(_countries().select("iso3", "region").iter_rows())
+
+
+@lru_cache(maxsize=1)
+def country_names() -> dict[str, str]:
+    """ISO3 codes Silfio accepts for current countries and territories, by name."""
+    named = _countries().filter(pl.col("country").is_not_null()).sort("country")
+    return dict(named.select("iso3", "country").iter_rows())
+
+
+def _countries() -> pl.DataFrame:
+    return pl.read_csv(Path(__file__).parent / "data" / "country_regions.csv")
 
 
 def sort_locations(frame: pl.DataFrame) -> pl.DataFrame:
