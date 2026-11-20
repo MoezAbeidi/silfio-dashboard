@@ -6,7 +6,9 @@ import gzip
 import io
 import json
 import math
+import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +19,8 @@ import pyarrow.parquet as pq
 import requests
 
 TIMEOUT_S = 3600
+# Long runs answer with a redirect every few minutes; allow runs of many hours.
+MAX_REDIRECTS = 500
 
 
 def load_portfolio(path) -> pl.DataFrame:
@@ -287,21 +291,44 @@ def is_scenario(payload: dict) -> bool:
     )
 
 
-def run(api_url: str, api_key: str, payload: dict) -> dict[str, pl.DataFrame]:
+def run(api_url: str, api_key: str, payload: dict, on_progress=None) -> dict[str, pl.DataFrame]:
+    """Run and wait; while waiting, pass the run's status to ``on_progress`` every few seconds."""
     endpoint = "/scenario" if is_scenario(payload) else "/run"
-    resp = requests.post(
-        api_url.rstrip("/") + endpoint,
-        params={"rating_factors": "true"},
-        data=gzip.compress(json.dumps(payload).encode()),
-        headers={"Content-Encoding": "gzip", "Content-Type": "application/json"}
-        | ({"X-API-Key": api_key} if api_key else {}),
-        timeout=TIMEOUT_S,
-    )
+    run_id = uuid.uuid4().hex
+    session = requests.Session()
+    session.max_redirects = MAX_REDIRECTS
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(
+            session.post,
+            api_url.rstrip("/") + endpoint,
+            params={"rating_factors": "true"},
+            data=gzip.compress(json.dumps(payload).encode()),
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json", "X-Run-ID": run_id}
+            | ({"X-API-Key": api_key} if api_key else {}),
+            timeout=TIMEOUT_S,
+        )
+        while on_progress is not None and not wait([request], timeout=3).done:
+            on_progress(run_status(api_url, api_key, run_id))
+        resp = request.result()
     if not resp.ok:
         raise RuntimeError(_error_detail(resp))
     with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
         tables = {Path(name).stem: pl.read_parquet(archive.read(name)) for name in archive.namelist()}
     return tables
+
+
+def run_status(api_url: str, api_key: str, run_id: str) -> dict | None:
+    """Queue position and percent done, or None before the run is queued or when the API runs inline."""
+    try:
+        resp = requests.get(
+            api_url.rstrip("/") + f"/runs/{run_id}/status",
+            headers={"X-API-Key": api_key} if api_key else {},
+            timeout=10,
+        )
+    except requests.RequestException:
+        return None
+    result = resp.json() if resp.ok else None
+    return result
 
 
 def theatres_version(api_url: str, api_key: str) -> str:

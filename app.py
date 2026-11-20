@@ -80,9 +80,20 @@ def scenarios_file() -> Path:
 
 
 def run_model(payload: dict) -> dict[str, pl.DataFrame]:
-    """Request fresh results only when a Run button is pressed."""
-    with st.spinner("Running Silfio…"):
-        return sc.run(API_URL, API_KEY, payload)
+    """Request fresh results only when a Run button is pressed, showing the run's progress."""
+    bar = st.progress(0, text="Running Silfio…")
+
+    def show(status):
+        if status and status["status"] == "queued":
+            bar.progress(0, text=f"Queued behind {status['position'] or 0} other runs…")
+        elif status and status["progress"] == 0:
+            bar.progress(0, text="Preparing run: loading the portfolio and conflict simulations…")
+        elif status:
+            bar.progress(status["progress"], text=f"Running Silfio… {status['progress']}%")
+
+    result = sc.run(API_URL, API_KEY, payload, on_progress=show)
+    bar.empty()
+    return result
 
 
 @st.cache_data
