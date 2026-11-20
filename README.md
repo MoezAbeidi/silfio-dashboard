@@ -182,6 +182,17 @@ and Pricing details retain one row per property and sort by **region → country
 Americas, Asia, Europe, MENA and Oceania. Unrecognised codes appear as
 **Unknown / other**.
 
+### Large books
+
+Books with more than 5,000 properties stay responsive:
+
+- The map groups sites into grid cells, as fine as allows 5,000 cells or fewer.
+  Circle size is the cell's total insured value and colour its combined loss
+  cost. Hover over a cell for its site count, value and loss cost.
+- Location tables show the 5,000 largest properties by expected loss.
+- Edit the properties CSV and import it, rather than editing in the dashboard.
+  Scenario overrides are by country.
+
 ### Pricing details
 
 This table explains the property-level drivers behind the selected result:

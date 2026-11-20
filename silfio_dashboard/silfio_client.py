@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import gzip
 import io
+import json
 import math
+import zipfile
 from datetime import date, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -13,7 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-TIMEOUT_S = 600
+TIMEOUT_S = 3600
 
 
 def load_portfolio(path) -> pl.DataFrame:
@@ -288,14 +291,17 @@ def run(api_url: str, api_key: str, payload: dict) -> dict[str, pl.DataFrame]:
     endpoint = "/scenario" if is_scenario(payload) else "/run"
     resp = requests.post(
         api_url.rstrip("/") + endpoint,
-        params={"format": "json", "rating_factors": "true"},
-        json=payload,
-        headers={"X-API-Key": api_key} if api_key else {},
+        params={"rating_factors": "true"},
+        data=gzip.compress(json.dumps(payload).encode()),
+        headers={"Content-Encoding": "gzip", "Content-Type": "application/json"}
+        | ({"X-API-Key": api_key} if api_key else {}),
         timeout=TIMEOUT_S,
     )
     if not resp.ok:
         raise RuntimeError(_error_detail(resp))
-    return {name: pl.DataFrame(rows, infer_schema_length=None) for name, rows in resp.json().items()}
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        tables = {Path(name).stem: pl.read_parquet(archive.read(name)) for name in archive.namelist()}
+    return tables
 
 
 def theatres_version(api_url: str, api_key: str) -> str:

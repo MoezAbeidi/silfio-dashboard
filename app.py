@@ -31,6 +31,10 @@ BPS_RANGE = (0.1, 200.0)
 SHARE_RANGE = (0.001, 0.5)
 LABEL_MIN_SHARE = 0.05
 EARTH_RADIUS_KM = 6371.0
+MAP_SITES_LIMIT = 5_000
+TABLE_ROWS_LIMIT = 5_000
+EDIT_ROWS_LIMIT = 5_000
+CELL_SIZES_DEG = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
 
 st.set_page_config(page_title="Silfio", layout="wide")
 
@@ -220,8 +224,45 @@ def site_theatre_share(sites: pl.DataFrame, centres: pl.DataFrame | None) -> np.
     return share
 
 
+def map_cells(sites: pl.DataFrame) -> pl.DataFrame:
+    """Sites grouped into grid cells, the finest that leaves at most MAP_SITES_LIMIT of them:
+    site count, total value and loss, and the cell's average position."""
+    cells = sites
+    for size in CELL_SIZES_DEG:
+        cells = (
+            sites.group_by((pl.col("latitude") / size).floor(), (pl.col("longitude") / size).floor())
+            .agg(
+                pl.len().alias("sites"),
+                pl.col("iso3").mode().first(),
+                *(pl.col(c).sum() for c in ("value_usd", "expected_loss") if c in sites.columns),
+                pl.col("latitude").mean().alias("lat"),
+                pl.col("longitude").mean().alias("lon"),
+            )
+            .drop("latitude", "longitude")
+            .rename({"lat": "latitude", "lon": "longitude"})
+        )
+        if cells.height <= MAP_SITES_LIMIT:
+            break
+    if "expected_loss" in cells.columns:
+        cells = cells.with_columns(
+            pl.when(pl.col("value_usd") > 0).then(pl.col("expected_loss") / pl.col("value_usd") * 1e4).alias("bps")
+        )
+    return cells
+
+
+def largest(frame: pl.DataFrame, by: str) -> pl.DataFrame:
+    """At most TABLE_ROWS_LIMIT rows, the largest by `by`, with a note when rows are left out."""
+    if frame.height <= TABLE_ROWS_LIMIT:
+        return frame
+    st.caption(f"Showing the {TABLE_ROWS_LIMIT:,} largest of {frame.height:,} locations by {by.replace('_', ' ')}.")
+    result = frame.sort(by, descending=True, nulls_last=True).head(TABLE_ROWS_LIMIT)
+    return result
+
+
 def fit_view(points: pl.DataFrame) -> pdk.ViewState:
     """Frame every point, from one city up to a global book."""
+    if points.height > MAP_SITES_LIMIT:
+        points = points.sample(MAP_SITES_LIMIT, seed=0)
     view = pdk.data_utils.compute_view(points.select("longitude", "latitude").rows(), view_proportion=1)
     view.min_zoom = 1.0  # Keep interactive zoom within the full-world view.
     view.zoom = float(min(max(view.zoom - 0.3, view.min_zoom), 6.0))
@@ -458,42 +499,49 @@ def edit_assumptions() -> None:
             key="countries_editor",
         )
     with tab_sites:
-        sites_edit = st.data_editor(
-            current["sites"].to_arrow(),
-            column_order=[
-                "property_name_or_address",
-                "iso3",
-                "occupancy",
-                "value",
-                "currency",
-                "standalone_probability_pct",
-                "location_factor",
-                "occupancy_factor",
-            ],
-            hide_index=True,
-            width="stretch",
-            height=min(38 + 35 * len(current["sites"]), 520),
-            disabled=["property_name_or_address", "iso3", "occupancy", "value", "currency"],
-            column_config={
-                "property_name_or_address": "Site",
-                "iso3": "Country",
-                "occupancy": "Occupancy",
-                "value": st.column_config.NumberColumn("Insured value (original currency)", format="%,.0f"),
-                "standalone_probability_pct": st.column_config.NumberColumn(
-                    "Annual targeted-strike probability override (%)",
-                    min_value=0,
-                    max_value=100,
-                    help="Replaces the modelled sub-threshold probability; 0 disables it",
-                ),
-                "location_factor": st.column_config.NumberColumn(
-                    "Location ×", min_value=0, max_value=100, help="Relative to the country average"
-                ),
-                "occupancy_factor": st.column_config.NumberColumn(
-                    "Occupancy ×", min_value=0, max_value=100, help="Relative to residential"
-                ),
-            },
-            key="sites_editor",
-        )
+        if current["sites"].height > EDIT_ROWS_LIMIT:
+            st.info(
+                f"Site overrides are available for books of up to {EDIT_ROWS_LIMIT:,} sites. "
+                "Use the Countries tab for this book."
+            )
+            sites_edit = current["sites"].to_arrow()
+        else:
+            sites_edit = st.data_editor(
+                current["sites"].to_arrow(),
+                column_order=[
+                    "property_name_or_address",
+                    "iso3",
+                    "occupancy",
+                    "value",
+                    "currency",
+                    "standalone_probability_pct",
+                    "location_factor",
+                    "occupancy_factor",
+                ],
+                hide_index=True,
+                width="stretch",
+                height=min(38 + 35 * len(current["sites"]), 520),
+                disabled=["property_name_or_address", "iso3", "occupancy", "value", "currency"],
+                column_config={
+                    "property_name_or_address": "Site",
+                    "iso3": "Country",
+                    "occupancy": "Occupancy",
+                    "value": st.column_config.NumberColumn("Insured value (original currency)", format="%,.0f"),
+                    "standalone_probability_pct": st.column_config.NumberColumn(
+                        "Annual targeted-strike probability override (%)",
+                        min_value=0,
+                        max_value=100,
+                        help="Replaces the modelled sub-threshold probability; 0 disables it",
+                    ),
+                    "location_factor": st.column_config.NumberColumn(
+                        "Location ×", min_value=0, max_value=100, help="Relative to the country average"
+                    ),
+                    "occupancy_factor": st.column_config.NumberColumn(
+                        "Occupancy ×", min_value=0, max_value=100, help="Relative to residential"
+                    ),
+                },
+                key="sites_editor",
+            )
     st.divider()
     scenario_name = st.text_input("Scenario name", key="scenario_save_name")
     if DOWNLOAD_SCENARIOS:
@@ -576,7 +624,9 @@ def assumption_lines(assumptions: dict[str, pl.DataFrame]) -> list[str]:
             parts.append(f"damage {r['damage_pct']:g}%")
         if parts:
             lines.append(f"**{r['iso3']}**: " + ", ".join(parts))
-    for r in assumptions["sites"].iter_rows(named=True):
+    overrides = ("location_factor", "occupancy_factor", "standalone_probability_pct")
+    sites = assumptions["sites"].filter(pl.any_horizontal(pl.col(c).fill_nan(None).is_not_null() for c in overrides))
+    for r in sites.iter_rows(named=True):
         parts = []
         if sc._float_or_none(r["location_factor"]) is not None:
             parts.append(f"location ×{r['location_factor']:g}")
@@ -597,35 +647,43 @@ def edit_portfolio() -> None:
         properties = properties.with_columns(pl.lit(None, dtype=pl.String).alias("policy_ids"))
     tab_properties, tab_policies = st.tabs(["Properties", "Policies"])
     with tab_properties:
-        properties_edit = st.data_editor(
-            properties.to_arrow(),
-            num_rows="dynamic",
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "occupancy": st.column_config.SelectboxColumn(
-                    "occupancy",
-                    options=sc.OCCUPANCIES,
-                    help="critical_industrial: refineries, power plants, oil and gas terminals, petrochemicals, "
-                    "desalination, key fabs or defence production. Ordinary factories are industrial.",
-                ),
-                "iso3": st.column_config.SelectboxColumn(
-                    "iso3",
-                    options=list(sc.country_names()),
-                    format_func=lambda c: f"{sc.country_names().get(c, c)} ({c})",
-                    help="Country. Type to search by name.",
-                ),
-                "policy_ids": st.column_config.TextColumn("policy_ids", help="Separate several with ;"),
-                **{
-                    c: st.column_config.NumberColumn(
-                        f"{c} (optional)", help="Leave blank to estimate from local buildings."
-                    )
-                    for c in BUILDING_COLUMNS
-                    if c in properties.columns
+        if properties.height > EDIT_ROWS_LIMIT:
+            st.info(
+                f"This book has {properties.height:,} properties, too many to edit here. "
+                "Edit the CSV and import it from the sidebar."
+            )
+            properties_edit = properties.to_arrow()
+        else:
+            properties_edit = st.data_editor(
+                properties.to_arrow(),
+                num_rows="dynamic",
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "occupancy": st.column_config.SelectboxColumn(
+                        "occupancy",
+                        options=sc.OCCUPANCIES,
+                        help="critical_industrial: refineries, power plants, oil and gas terminals, "
+                        "petrochemicals, desalination, key fabs or defence production. "
+                        "Ordinary factories are industrial.",
+                    ),
+                    "iso3": st.column_config.SelectboxColumn(
+                        "iso3",
+                        options=list(sc.country_names()),
+                        format_func=lambda c: f"{sc.country_names().get(c, c)} ({c})",
+                        help="Country. Type to search by name.",
+                    ),
+                    "policy_ids": st.column_config.TextColumn("policy_ids", help="Separate several with ;"),
+                    **{
+                        c: st.column_config.NumberColumn(
+                            f"{c} (optional)", help="Leave blank to estimate from local buildings."
+                        )
+                        for c in BUILDING_COLUMNS
+                        if c in properties.columns
+                    },
                 },
-            },
-            key=f"edit_properties_{book}",
-        )
+                key=f"edit_properties_{book}",
+            )
     with tab_policies:
         policies_edit = st.data_editor(
             sc.policies_frame(policy_path).to_arrow(),
@@ -703,7 +761,7 @@ with st.sidebar:
         if st.button("Edit portfolio", width="stretch"):
             edit_portfolio()
         exposure_summary = st.empty()
-        st.caption(f"{len(portfolio)} sites · {len(countries)} countries")
+        st.caption(f"{len(portfolio):,} sites · {len(countries)} countries")
         if programme:
             n = len(programme[0])
             st.caption(
@@ -817,19 +875,32 @@ with summary_area:
     }
     if not views:
         st.title("Portfolio")
-        locations = [
-            {
-                "position": [row["longitude"], row["latitude"]],
-                "radius": 7,
-                "colour": [125, 135, 150, 220],
-                "label": (
-                    f"{row['property_name_or_address']} · {row['iso3']}\n"
-                    f"Insured value: {row['value']:,.0f} {row['currency']}\n"
-                    "Loss cost: not calculated"
-                ),
-            }
-            for row in portfolio.iter_rows(named=True)
-        ]
+        if portfolio.height > MAP_SITES_LIMIT:
+            cells = map_cells(portfolio)
+            biggest = cells["sites"].max()
+            locations = [
+                {
+                    "position": [lon, lat],
+                    "radius": 4 + 8 * np.sqrt(n / biggest),
+                    "colour": [125, 135, 150, 220],
+                    "label": f"{n:,} sites · {iso3}\nLoss cost: not calculated",
+                }
+                for n, iso3, lat, lon in cells.select("sites", "iso3", "latitude", "longitude").rows()
+            ]
+        else:
+            locations = [
+                {
+                    "position": [row["longitude"], row["latitude"]],
+                    "radius": 7,
+                    "colour": [125, 135, 150, 220],
+                    "label": (
+                        f"{row['property_name_or_address']} · {row['iso3']}\n"
+                        f"Insured value: {row['value']:,.0f} {row['currency']}\n"
+                        "Loss cost: not calculated"
+                    ),
+                }
+                for row in portfolio.iter_rows(named=True)
+            ]
         map_area.pydeck_chart(
             pdk.Deck(
                 map_style="light",
@@ -854,7 +925,12 @@ with summary_area:
             ),
             height=560,
         )
-        details_area.dataframe(sc.sort_locations(portfolio), hide_index=True, width="stretch")
+        with details_area:
+            if portfolio.height > MAP_SITES_LIMIT:
+                st.caption(
+                    f"{portfolio.height:,} sites grouped into {cells.height:,} grid cells. Size: sites per cell."
+                )
+            st.dataframe(sc.sort_locations(largest(portfolio, "value")), hide_index=True, width="stretch")
         st.stop()
 
     baseline = st.session_state.get("baseline_results")
@@ -931,26 +1007,50 @@ polygons, share_labels, centres = theatre_data() if show_theatres else (None, []
 sites = sc.site_results(portfolio, tables)
 sites = sites.with_columns(pl.Series("theatre_share", site_theatre_share(sites, centres)))
 theatre_measure = "sub-threshold incidents" if subthreshold_view else "fighting"
-usd_sizes = sites["value_usd"].fill_null(0.0).to_numpy()
-radius = 5 + 9 * np.sqrt(usd_sizes / usd_sizes.max()) if usd_sizes.max() > 0 else np.full(len(sites), 5.0)
-site_data = [
-    {
-        "position": [lon, lat],
-        "radius": r,
-        "colour": c,
-        "label": (f"{name}: {bps:,.1f} bps" if bps is not None else f"{name}: loss cost unavailable")
-        + ("" if np.isnan(s) else f" · theatre {s:.1%} of {theatre_measure}"),
-    }
-    for name, lon, lat, r, c, bps, s in zip(
-        sites["property_name_or_address"],
-        sites["longitude"],
-        sites["latitude"],
-        radius,
-        ramp(sites["bps"].to_numpy(), BPS_RANGE, SITE_PALETTE, alpha=220, stops=SITE_STOPS),
-        sites["bps"],
-        sites["theatre_share"],
-    )
-]
+cells = map_cells(sites) if sites.height > MAP_SITES_LIMIT else None
+points = sites if cells is None else cells
+usd_sizes = points["value_usd"].fill_null(0.0).to_numpy()
+radius = 5 + 9 * np.sqrt(usd_sizes / usd_sizes.max()) if usd_sizes.max() > 0 else np.full(len(points), 5.0)
+colours = ramp(points["bps"].to_numpy(), BPS_RANGE, SITE_PALETTE, alpha=220, stops=SITE_STOPS)
+if cells is None:
+    site_data = [
+        {
+            "position": [lon, lat],
+            "radius": r,
+            "colour": c,
+            "label": (f"{name}: {bps:,.1f} bps" if bps is not None else f"{name}: loss cost unavailable")
+            + ("" if np.isnan(s) else f" · theatre {s:.1%} of {theatre_measure}"),
+        }
+        for name, lon, lat, r, c, bps, s in zip(
+            sites["property_name_or_address"],
+            sites["longitude"],
+            sites["latitude"],
+            radius,
+            colours,
+            sites["bps"],
+            sites["theatre_share"],
+        )
+    ]
+else:
+    site_data = [
+        {
+            "position": [lon, lat],
+            "radius": r,
+            "colour": c,
+            "label": f"{n:,} sites · {iso3} · {money(value or 0.0)} · "
+            + (f"{bps:,.1f} bps" if bps is not None else "loss cost unavailable"),
+        }
+        for n, iso3, lon, lat, value, bps, r, c in zip(
+            cells["sites"],
+            cells["iso3"],
+            cells["longitude"],
+            cells["latitude"],
+            cells["value_usd"],
+            cells["bps"],
+            radius,
+            colours,
+        )
+    ]
 
 layers = []
 if show_theatres and polygons:
@@ -1009,13 +1109,18 @@ if not show_theatres:
     centres = theatre_data()[2]
     sites = sites.with_columns(pl.Series("theatre_share", site_theatre_share(sites, centres)))
 caption = "Size: insured value. Colour: loss cost, 0.1–200+ bps."
+if cells is not None:
+    caption = (
+        f"{sites.height:,} sites grouped into {cells.height:,} grid cells. "
+        "Size: total insured value. Colour: the cell's combined loss cost, 0.1–200+ bps."
+    )
 if show_theatres:
     caption += f" Shading: theatre share of {theatre_measure}."
 with details_area:
     st.caption(caption)
 
     st.dataframe(
-        sc.sort_locations(sites).select(
+        sc.sort_locations(largest(sites, "expected_loss")).select(
             "region", "iso3", "property_name_or_address", "value_usd", "expected_loss", "bps"
         ),
         hide_index=True,
@@ -1087,11 +1192,14 @@ with details_area:
     if "rating_factors" not in tables:
         st.info("Rating factors unavailable for this run.")
     details = sc.sort_locations(
-        sc.pricing_details(portfolio, tables).join(
-            sites.select("property_name_or_address", "theatre_share"),
-            on="property_name_or_address",
-            how="left",
-            validate="1:1",
+        largest(
+            sc.pricing_details(portfolio, tables).join(
+                sites.select("property_name_or_address", "theatre_share"),
+                on="property_name_or_address",
+                how="left",
+                validate="1:1",
+            ),
+            "expected_ground_up_loss",
         )
     )
     st.dataframe(
