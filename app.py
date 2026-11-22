@@ -3,8 +3,10 @@
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +36,7 @@ EARTH_RADIUS_KM = 6371.0
 MAP_SITES_LIMIT = 5_000
 TABLE_ROWS_LIMIT = 5_000
 EDIT_ROWS_LIMIT = 5_000
+SITE_OVERRIDES = ("standalone_probability_pct", "location_factor", "occupancy_factor")
 CELL_SIZES_DEG = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
 
 st.set_page_config(page_title="Silfio", layout="wide")
@@ -79,19 +82,34 @@ def scenarios_file() -> Path:
     return session_dir() / "scenarios.csv" if DOWNLOAD_SCENARIOS else SCENARIOS_FILE
 
 
+def cancel_run() -> None:
+    """Stop the run in progress; pressing the button also stops this session waiting for it."""
+    run_id = st.session_state.pop("active_run", None)
+    if run_id:
+        sc.cancel_run(API_URL, API_KEY, run_id)
+        st.session_state["run_cancelled"] = True
+
+
 def run_model(payload: dict) -> dict[str, pl.DataFrame]:
     """Request fresh results only when a Run button is pressed, showing the run's progress."""
+    run_id = uuid.uuid4().hex
+    st.session_state["active_run"] = run_id
     bar = st.progress(0, text="Running Silfio…")
+    st.button("Cancel run", on_click=cancel_run)
 
     def show(status):
-        if status and status["status"] == "queued":
+        # Always touch the page, so a Cancel press can interrupt the wait within seconds
+        if not status:
+            bar.progress(0, text="Running Silfio…")
+        elif status["status"] == "queued":
             bar.progress(0, text=f"Queued behind {status['position'] or 0} other runs…")
         elif status and status["progress"] == 0:
             bar.progress(0, text="Preparing run: loading the portfolio and conflict simulations…")
         elif status:
             bar.progress(status["progress"], text=f"Running Silfio… {status['progress']}%")
 
-    result = sc.run(API_URL, API_KEY, payload, on_progress=show)
+    result = sc.run(API_URL, API_KEY, payload, on_progress=show, run_id=run_id)
+    st.session_state.pop("active_run", None)
     bar.empty()
     return result
 
@@ -172,17 +190,7 @@ def theatre_layers(
     ]
     colour = ramp(t["shown"].to_numpy(), SHARE_RANGE, PALETTE[3:], alpha=150)
     polygons = [{"polygon": r, "colour": c, "label": name} for r, c, name in zip(rings, colour, label)]
-    body = json.dumps(polygons, separators=(",", ":"))
-    name = f"theatres-{hashlib.sha1(body.encode()).hexdigest()[:16]}.json"
-    STATIC.mkdir(exist_ok=True)
-    for old in STATIC.glob("theatres-*.json"):
-        if old.name != name and time.time() - old.stat().st_mtime > 86_400:
-            old.unlink(missing_ok=True)
-    if not (STATIC / name).exists():
-        # Write then rename, so a visitor never fetches a file another session is still writing.
-        with tempfile.NamedTemporaryFile("w", dir=STATIC, suffix=".tmp", delete=False) as handle:
-            handle.write(body)
-        os.replace(handle.name, STATIC / name)
+    url = static_json("theatres", polygons)
     first = t.select(pl.struct("iso3", "theatre_id").is_first_distinct()).to_series().to_numpy()
     centres = t.filter(first).select("iso3", "theatre_id", "shown", "latitude", "longitude")
     big = first & (t["shown"].to_numpy() >= label_min)
@@ -192,7 +200,59 @@ def theatre_layers(
             t["shown"].filter(big), t["latitude"].filter(big), t["longitude"].filter(big), np.array(label)[big]
         )
     ]
-    return f"app/static/{name}", labels, centres
+    return url, labels, centres
+
+
+def static_json(prefix: str, data) -> str:
+    """URL of a static JSON file holding `data`, named by its hash; files with the same
+    prefix left untouched for a day are cleared."""
+    body = json.dumps(data, separators=(",", ":"))
+    name = f"{prefix}-{hashlib.sha1(body.encode()).hexdigest()[:16]}.json"
+    STATIC.mkdir(exist_ok=True)
+    for old in STATIC.glob(f"{prefix}-*.json"):
+        if old.name != name and time.time() - old.stat().st_mtime > 86_400:
+            old.unlink(missing_ok=True)
+    if not (STATIC / name).exists():
+        # Write then rename, so a visitor never fetches a file another session is still writing.
+        with tempfile.NamedTemporaryFile("w", dir=STATIC, suffix=".tmp", delete=False) as handle:
+            handle.write(body)
+        os.replace(handle.name, STATIC / name)
+    result = f"app/static/{name}"
+    return result
+
+
+@st.cache_data(max_entries=8)
+def theatre_borders(countries: tuple[str, ...], version: str) -> list[dict]:
+    """Country borders traced from the theatre outlines, so they line up with the
+    theatres: an edge two theatres of the same country share is internal, and the edges
+    left over run along the border."""
+    rings, t = fetch_theatres(countries, version)
+    codes = t["iso3"].to_list()
+
+    def edge(code, a, b):
+        result = (code, *sorted((tuple(a), tuple(b))))
+        return result
+
+    seen = {}
+    for code, polygon in zip(codes, rings):
+        for ring in polygon:
+            for a, b in zip(ring, ring[1:]):
+                key = edge(code, a, b)
+                seen[key] = seen.get(key, 0) + 1
+    paths = []
+    for code, polygon in zip(codes, rings):
+        for ring in polygon:
+            path = []
+            for a, b in zip(ring, ring[1:]):
+                if seen[edge(code, a, b)] == 1:
+                    path = path or [a]
+                    path.append(b)
+                elif path:
+                    paths.append({"path": path})
+                    path = []
+            if path:
+                paths.append({"path": path})
+    return paths
 
 
 def ramp(
@@ -237,20 +297,22 @@ def site_theatre_share(sites: pl.DataFrame, centres: pl.DataFrame | None) -> np.
 
 def map_cells(sites: pl.DataFrame) -> pl.DataFrame:
     """Sites grouped into grid cells, the finest that leaves at most MAP_SITES_LIMIT of them:
-    site count, total value and loss, and the cell's average position."""
+    site count, total value and loss, the cell's average position and its key (size, row, col)."""
     cells = sites
     for size in CELL_SIZES_DEG:
         cells = (
-            sites.group_by((pl.col("latitude") / size).floor(), (pl.col("longitude") / size).floor())
+            sites.group_by(
+                (pl.col("latitude") / size).floor().alias("row"), (pl.col("longitude") / size).floor().alias("col")
+            )
             .agg(
                 pl.len().alias("sites"),
                 pl.col("iso3").mode().first(),
                 *(pl.col(c).sum() for c in ("value_usd", "expected_loss") if c in sites.columns),
-                pl.col("latitude").mean().alias("lat"),
-                pl.col("longitude").mean().alias("lon"),
+                pl.col("latitude").mean(),
+                pl.col("longitude").mean(),
             )
-            .drop("latitude", "longitude")
-            .rename({"lat": "latitude", "lon": "longitude"})
+            .with_columns(pl.concat_list(pl.lit(size), "row", "col").alias("cell"))
+            .drop("row", "col")
         )
         if cells.height <= MAP_SITES_LIMIT:
             break
@@ -259,6 +321,23 @@ def map_cells(sites: pl.DataFrame) -> pl.DataFrame:
             pl.when(pl.col("value_usd") > 0).then(pl.col("expected_loss") / pl.col("value_usd") * 1e4).alias("bps")
         )
     return cells
+
+
+def expand_cell() -> None:
+    """Focus the map on the grid cell just clicked; a single site has no cell to expand."""
+    picked = st.session_state["site_map"].selection["objects"].get("portfolio-locations", [])
+    if picked and picked[0].get("cell"):
+        st.session_state["map_focus"] = picked[0]["cell"]
+
+
+def focused(frame: pl.DataFrame) -> pl.DataFrame:
+    """The sites in the grid cell last clicked on the map, or all of them."""
+    focus = st.session_state.get("map_focus")
+    if not isinstance(focus, list) or len(focus) != 3:
+        return frame
+    size, row, col = focus
+    result = frame.filter(((pl.col("latitude") / size).floor() == row) & ((pl.col("longitude") / size).floor() == col))
+    return result
 
 
 def largest(frame: pl.DataFrame, by: str) -> pl.DataFrame:
@@ -349,6 +428,12 @@ def take_uploads() -> None:
             st.session_state.pop("upload_error", None)
 
 
+def clear_site_editors() -> None:
+    """Edits in a sites table are kept by row position, so they must go when its rows change."""
+    for key in [k for k in st.session_state if str(k).startswith("sites_editor")]:
+        st.session_state.pop(key)
+
+
 def reset_for_new_book() -> None:
     """Assumptions, edits and results belong to one book, so a new book starts clean."""
     for key in (
@@ -356,7 +441,6 @@ def reset_for_new_book() -> None:
         "baseline_results",
         "scenario_results",
         "countries_editor",
-        "sites_editor",
         "scenario_save_name",
         "view",
         "run_requested",
@@ -364,6 +448,7 @@ def reset_for_new_book() -> None:
         "run_error",
     ):
         st.session_state.pop(key, None)
+    clear_site_editors()
 
 
 take_uploads()
@@ -477,7 +562,7 @@ if "currency" not in st.session_state.assumptions["sites"].columns:
     st.session_state.assumptions["sites"] = st.session_state.assumptions["sites"].join(
         portfolio.select("property_name_or_address", "currency"), on="property_name_or_address", how="left"
     )
-    st.session_state.pop("sites_editor", None)
+    clear_site_editors()
 if "value" in st.session_state.assumptions["countries"].columns:
     st.session_state.assumptions["countries"] = st.session_state.assumptions["countries"].drop("value")
     st.session_state.pop("countries_editor", None)
@@ -510,49 +595,68 @@ def edit_assumptions() -> None:
             key="countries_editor",
         )
     with tab_sites:
-        if current["sites"].height > EDIT_ROWS_LIMIT:
-            st.info(
-                f"Site overrides are available for books of up to {EDIT_ROWS_LIMIT:,} sites. "
-                "Use the Countries tab for this book."
-            )
-            sites_edit = current["sites"].to_arrow()
-        else:
-            sites_edit = st.data_editor(
-                current["sites"].to_arrow(),
-                column_order=[
-                    "property_name_or_address",
-                    "iso3",
-                    "occupancy",
-                    "value",
-                    "currency",
-                    "standalone_probability_pct",
-                    "location_factor",
-                    "occupancy_factor",
-                ],
-                hide_index=True,
-                width="stretch",
-                height=min(38 + 35 * len(current["sites"]), 520),
-                disabled=["property_name_or_address", "iso3", "occupancy", "value", "currency"],
-                column_config={
-                    "property_name_or_address": "Site",
-                    "iso3": "Country",
-                    "occupancy": "Occupancy",
-                    "value": st.column_config.NumberColumn("Insured value (original currency)", format="%,.0f"),
-                    "standalone_probability_pct": st.column_config.NumberColumn(
-                        "Annual targeted-strike probability override (%)",
-                        min_value=0,
-                        max_value=100,
-                        help="Replaces the modelled sub-threshold probability; 0 disables it",
-                    ),
-                    "location_factor": st.column_config.NumberColumn(
-                        "Location ×", min_value=0, max_value=100, help="Relative to the country average"
-                    ),
-                    "occupancy_factor": st.column_config.NumberColumn(
-                        "Occupancy ×", min_value=0, max_value=100, help="Relative to residential"
-                    ),
-                },
-                key="sites_editor",
-            )
+        sites = current["sites"].with_row_index("row")
+        query = ""
+        if sites.height > EDIT_ROWS_LIMIT:
+            # Large books: edit the sites a search finds, plus every site already overridden
+            query = st.text_input(
+                "Find sites", placeholder="Part of a name or address, or a country code", key="sites_query"
+            ).strip()
+            match = pl.any_horizontal(pl.col(SITE_OVERRIDES).is_not_null())
+            if query:
+                match = (
+                    match
+                    | pl.col("property_name_or_address").str.contains(f"(?i){re.escape(query)}")
+                    | (pl.col("iso3") == query.upper())
+                )
+            sites = sites.filter(match)
+            if sites.height > EDIT_ROWS_LIMIT:
+                st.caption(f"Showing the first {EDIT_ROWS_LIMIT:,} of {sites.height:,} matches; narrow the search.")
+                sites = sites.head(EDIT_ROWS_LIMIT)
+            st.caption("Apply changes before searching for other sites. Overridden sites always stay listed.")
+        edited = st.data_editor(
+            sites.to_arrow(),
+            column_order=[
+                "property_name_or_address",
+                "iso3",
+                "occupancy",
+                "value",
+                "currency",
+                "standalone_probability_pct",
+                "location_factor",
+                "occupancy_factor",
+            ],
+            hide_index=True,
+            width="stretch",
+            height=min(38 + 35 * max(sites.height, 1), 520),
+            disabled=["property_name_or_address", "iso3", "occupancy", "value", "currency"],
+            column_config={
+                "property_name_or_address": "Site",
+                "iso3": "Country",
+                "occupancy": "Occupancy",
+                "value": st.column_config.NumberColumn("Insured value (original currency)", format="%,.0f"),
+                "standalone_probability_pct": st.column_config.NumberColumn(
+                    "Annual targeted-strike probability override (%)",
+                    min_value=0,
+                    max_value=100,
+                    help="Replaces the modelled sub-threshold probability; 0 disables it",
+                ),
+                "location_factor": st.column_config.NumberColumn(
+                    "Location ×", min_value=0, max_value=100, help="Relative to the country average"
+                ),
+                "occupancy_factor": st.column_config.NumberColumn(
+                    "Occupancy ×", min_value=0, max_value=100, help="Relative to residential"
+                ),
+            },
+            key=f"sites_editor_{query}",
+        )
+        sites_edit = (
+            current["sites"]
+            .with_row_index("row")
+            .update(pl.from_arrow(edited).select("row", *SITE_OVERRIDES), on="row", include_nulls=True)
+            .drop("row")
+            .to_arrow()
+        )
     st.divider()
     scenario_name = st.text_input("Scenario name", key="scenario_save_name")
     if DOWNLOAD_SCENARIOS:
@@ -573,10 +677,12 @@ def edit_assumptions() -> None:
     apply, cancel = st.columns(2)
     if apply.button("Apply changes", type="primary", width="stretch"):
         st.session_state.assumptions = {"countries": pl.from_arrow(countries_edit), "sites": pl.from_arrow(sites_edit)}
+        clear_site_editors()
         st.session_state.pop("scenario_results", None)
         st.session_state.pop("run_error", None)
         st.rerun()
     if cancel.button("Cancel", width="stretch"):
+        clear_site_editors()
         st.rerun()
 
 
@@ -813,8 +919,9 @@ with st.sidebar:
                     st.session_state.assumptions = scenario_store.apply(
                         saved_scenarios[saved_name], st.session_state.assumptions
                     )
-                    for key in ("countries_editor", "sites_editor", "scenario_results", "run_error"):
+                    for key in ("countries_editor", "scenario_results", "run_error"):
                         st.session_state.pop(key, None)
+                    clear_site_editors()
                     st.session_state.scenario_save_name = saved_name
                     st.session_state.view = "Baseline"
                     st.rerun()
@@ -825,6 +932,8 @@ with st.sidebar:
 
 # Reserve the same map position on every rerun so React keeps its viewport alive.
 summary_area = st.container()
+if st.session_state.pop("run_cancelled", False):
+    st.info("Run cancelled.")
 map_area = st.container()  # Do not emit an empty element that unmounts the map during a run.
 details_area = st.container()
 st.caption("Data is processed on request and is not stored.")
@@ -886,17 +995,19 @@ with summary_area:
     }
     if not views:
         st.title("Portfolio")
-        if portfolio.height > MAP_SITES_LIMIT:
-            cells = map_cells(portfolio)
+        shown = focused(portfolio)
+        if shown.height > MAP_SITES_LIMIT:
+            cells = map_cells(shown)
             biggest = cells["sites"].max()
             locations = [
                 {
                     "position": [lon, lat],
                     "radius": 4 + 8 * np.sqrt(n / biggest),
                     "colour": [125, 135, 150, 220],
-                    "label": f"{n:,} sites · {iso3}\nLoss cost: not calculated",
+                    "label": f"{n:,} sites · {iso3}\nClick to show these sites",
+                    "cell": cell,
                 }
-                for n, iso3, lat, lon in cells.select("sites", "iso3", "latitude", "longitude").rows()
+                for n, iso3, lat, lon, cell in cells.select("sites", "iso3", "latitude", "longitude", "cell").rows()
             ]
         else:
             locations = [
@@ -910,12 +1021,14 @@ with summary_area:
                         "Loss cost: not calculated"
                     ),
                 }
-                for row in portfolio.iter_rows(named=True)
+                for row in shown.iter_rows(named=True)
             ]
+        if "map_focus" in st.session_state:
+            map_area.button("Show the whole book", on_click=lambda: st.session_state.pop("map_focus", None))
         map_area.pydeck_chart(
             pdk.Deck(
                 map_style="light",
-                initial_view_state=fit_view(portfolio),
+                initial_view_state=fit_view(shown),
                 layers=[
                     pdk.Layer(
                         "ScatterplotLayer",
@@ -935,13 +1048,17 @@ with summary_area:
                 tooltip={"text": "{label}"},
             ),
             height=560,
+            key="site_map",
+            on_select=expand_cell,
+            selection_mode="single-object",
         )
         with details_area:
-            if portfolio.height > MAP_SITES_LIMIT:
+            if shown.height > MAP_SITES_LIMIT:
                 st.caption(
-                    f"{portfolio.height:,} sites grouped into {cells.height:,} grid cells. Size: sites per cell."
+                    f"{shown.height:,} sites grouped into {cells.height:,} grid cells, each drawn at its sites' "
+                    "average position. Size: sites per cell. Click a cell to show its sites."
                 )
-            st.dataframe(sc.sort_locations(largest(portfolio, "value")), hide_index=True, width="stretch")
+            st.dataframe(sc.sort_locations(largest(shown, "value")), hide_index=True, width="stretch")
         st.stop()
 
     baseline = st.session_state.get("baseline_results")
@@ -1018,8 +1135,11 @@ polygons, share_labels, centres = theatre_data() if show_theatres else (None, []
 sites = sc.site_results(portfolio, tables)
 sites = sites.with_columns(pl.Series("theatre_share", site_theatre_share(sites, centres)))
 theatre_measure = "sub-threshold incidents" if subthreshold_view else "fighting"
-cells = map_cells(sites) if sites.height > MAP_SITES_LIMIT else None
-points = sites if cells is None else cells
+# A clicked grid cell expands into its own sites, regrouped only if it still holds too many
+focus = st.session_state.get("map_focus")
+shown = focused(sites)
+cells = map_cells(shown) if shown.height > MAP_SITES_LIMIT else None
+points = shown if cells is None else cells
 usd_sizes = points["value_usd"].fill_null(0.0).to_numpy()
 radius = 5 + 9 * np.sqrt(usd_sizes / usd_sizes.max()) if usd_sizes.max() > 0 else np.full(len(points), 5.0)
 colours = ramp(points["bps"].to_numpy(), BPS_RANGE, SITE_PALETTE, alpha=220, stops=SITE_STOPS)
@@ -1033,13 +1153,13 @@ if cells is None:
             + ("" if np.isnan(s) else f" · theatre {s:.1%} of {theatre_measure}"),
         }
         for name, lon, lat, r, c, bps, s in zip(
-            sites["property_name_or_address"],
-            sites["longitude"],
-            sites["latitude"],
+            shown["property_name_or_address"],
+            shown["longitude"],
+            shown["latitude"],
             radius,
             colours,
-            sites["bps"],
-            sites["theatre_share"],
+            shown["bps"],
+            shown["theatre_share"],
         )
     ]
 else:
@@ -1049,9 +1169,11 @@ else:
             "radius": r,
             "colour": c,
             "label": f"{n:,} sites · {iso3} · {money(value or 0.0)} · "
-            + (f"{bps:,.1f} bps" if bps is not None else "loss cost unavailable"),
+            + (f"{bps:,.1f} bps" if bps is not None else "loss cost unavailable")
+            + " · click to expand",
+            "cell": cell,
         }
-        for n, iso3, lon, lat, value, bps, r, c in zip(
+        for n, iso3, lon, lat, value, bps, r, c, cell in zip(
             cells["sites"],
             cells["iso3"],
             cells["longitude"],
@@ -1060,6 +1182,7 @@ else:
             cells["bps"],
             radius,
             colours,
+            cells["cell"].to_list(),
         )
     ]
 
@@ -1075,6 +1198,14 @@ if show_theatres and polygons:
             line_width_min_pixels=0.5,
             stroked=True,
             pickable=True,
+        ),
+        pdk.Layer(
+            "PathLayer",
+            static_json("borders", theatre_borders(countries, theatres_version())),
+            get_path="path",
+            get_color=[11, 22, 48, 180],
+            width_min_pixels=1.2,
+            pickable=False,
         ),
         pdk.Layer(
             "TextLayer",
@@ -1107,14 +1238,19 @@ layers.append(
     )
 )
 
+if focus is not None:
+    map_area.button("Show the whole book", on_click=lambda: st.session_state.pop("map_focus", None))
 map_area.pydeck_chart(
     pdk.Deck(
         map_style="light",
-        initial_view_state=fit_view(portfolio),
+        initial_view_state=fit_view(shown),
         layers=layers,
         tooltip={"text": "{label}"},
     ),
     height=560,
+    key="site_map",
+    on_select=expand_cell,
+    selection_mode="single-object",
 )
 if not show_theatres:
     centres = theatre_data()[2]
@@ -1122,16 +1258,21 @@ if not show_theatres:
 caption = "Size: insured value. Colour: loss cost, 0.1–200+ bps."
 if cells is not None:
     caption = (
-        f"{sites.height:,} sites grouped into {cells.height:,} grid cells. "
+        f"{shown.height:,} sites grouped into {cells.height:,} grid cells; click a cell to see its sites. "
         "Size: total insured value. Colour: the cell's combined loss cost, 0.1–200+ bps."
     )
+if focus is not None:
+    caption = f"Showing the {shown.height:,} sites in the selected cell. " + caption
+caption += (
+    " A loss cost of 0 means no simulated loss in 10,000 years: below the simulation's resolution, not zero risk."
+)
 if show_theatres:
     caption += f" Shading: theatre share of {theatre_measure}."
 with details_area:
     st.caption(caption)
 
     st.dataframe(
-        sc.sort_locations(largest(sites, "expected_loss")).select(
+        sc.sort_locations(largest(shown, "expected_loss")).select(
             "region", "iso3", "property_name_or_address", "value_usd", "expected_loss", "bps"
         ),
         hide_index=True,
@@ -1202,6 +1343,25 @@ with details_area:
     st.subheader("Pricing details")
     if "rating_factors" not in tables:
         st.info("Rating factors unavailable for this run.")
+
+    def all_pricing_details() -> bytes:
+        """Every site's pricing details, written only when the button is clicked."""
+        full = sc.pricing_details(portfolio, tables).join(
+            sites.select("property_name_or_address", "theatre_share"),
+            on="property_name_or_address",
+            how="left",
+            validate="1:1",
+        )
+        result = sc.sort_locations(full.drop("subthreshold_share", strict=False)).write_csv().encode()
+        return result
+
+    st.download_button(
+        f"Download pricing details for all {sites.height:,} sites (CSV)",
+        all_pricing_details,
+        file_name="pricing_details.csv",
+        mime="text/csv",
+        on_click="ignore",
+    )
     details = sc.sort_locations(
         largest(
             sc.pricing_details(portfolio, tables).join(
@@ -1230,7 +1390,6 @@ with details_area:
             "occupancy_factor",
             "hit_frequency",
             "theatre_share",
-            "subthreshold_share",
             "vulnerability_if_hit",
             "expected_ground_up_loss",
             "loss_cost_bps",
@@ -1248,25 +1407,19 @@ with details_area:
             "building_type": "Model occupancy class",
             "value_usd": st.column_config.NumberColumn("Insured value (USD)", format="$%,.0f"),
             "conflicts_simulated_ratio": st.column_config.NumberColumn(
-                "P(conflict)", format="percent", help="Annual probability of conflict, new or ongoing"
+                "P(conflict) ⓘ",
+                format="percent",
+                help=(
+                    "Annual probability that a new conflict starts in the country, or that at least one "
+                    "current conflict continues. Violence can still occur outside official UCDP conflicts; "
+                    "that is modelled too and included in the loss cost."
+                ),
             ),
             "ongoing_conflicts": st.column_config.NumberColumn("Ongoing conflicts", format="%d"),
             "mean_damage_conditional": st.column_config.NumberColumn("Country damage if conflict", format="percent"),
             "location_factor": st.column_config.NumberColumn("Location relativity", format="%.3f ×"),
             "occupancy_factor": st.column_config.NumberColumn("Occupancy relativity", format="%.3f ×"),
             "hit_frequency": st.column_config.NumberColumn("P(damage)", format="percent"),
-            "subthreshold_share": st.column_config.NumberColumn(
-                "Sub-threshold share ⓘ",
-                format="percent",
-                help=(
-                    "Share of damage years attributable to events grouped here as sub-threshold: "
-                    "violence below UCDP's death threshold, "
-                    "or fighting between two organised non-state armed groups. "
-                    "UCDP classifies the latter separately as non-state conflict when that threshold is met; "
-                    "state-based armed conflict requires at least one government party. "
-                    "[UCDP definitions](https://www.uu.se/en/department/peace-and-conflict-research/research/ucdp/ucdp-definitions)"
-                ),
-            ),
             "vulnerability_if_hit": st.column_config.NumberColumn("Vulnerability if hit", format="percent"),
             "expected_ground_up_loss": st.column_config.NumberColumn("Expected loss (USD)", format="$%,.0f"),
             "loss_cost_bps": st.column_config.NumberColumn("Loss cost (bps)", format="%.2f"),

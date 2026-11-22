@@ -291,13 +291,18 @@ def is_scenario(payload: dict) -> bool:
     )
 
 
-def run(api_url: str, api_key: str, payload: dict, on_progress=None) -> dict[str, pl.DataFrame]:
+def run(
+    api_url: str, api_key: str, payload: dict, on_progress=None, run_id: str | None = None
+) -> dict[str, pl.DataFrame]:
     """Run and wait; while waiting, pass the run's status to ``on_progress`` every few seconds."""
     endpoint = "/scenario" if is_scenario(payload) else "/run"
-    run_id = uuid.uuid4().hex
+    run_id = run_id or uuid.uuid4().hex
     session = requests.Session()
     session.max_redirects = MAX_REDIRECTS
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    # Not a with block: if the caller stops waiting (a cancelled run), leave the request
+    # thread to finish on its own instead of blocking until the API answers.
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
         request = pool.submit(
             session.post,
             api_url.rstrip("/") + endpoint,
@@ -310,11 +315,22 @@ def run(api_url: str, api_key: str, payload: dict, on_progress=None) -> dict[str
         while on_progress is not None and not wait([request], timeout=3).done:
             on_progress(run_status(api_url, api_key, run_id))
         resp = request.result()
+    finally:
+        pool.shutdown(wait=False)
     if not resp.ok:
         raise RuntimeError(_error_detail(resp))
     with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
         tables = {Path(name).stem: pl.read_parquet(archive.read(name)) for name in archive.namelist()}
     return tables
+
+
+def cancel_run(api_url: str, api_key: str, run_id: str) -> None:
+    """Ask the API to stop a run; it stops before its next batch."""
+    requests.delete(
+        api_url.rstrip("/") + f"/runs/{run_id}",
+        headers={"X-API-Key": api_key} if api_key else {},
+        timeout=10,
+    )
 
 
 def run_status(api_url: str, api_key: str, run_id: str) -> dict | None:
