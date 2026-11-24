@@ -302,19 +302,22 @@ def run(
     # Not a with block: if the caller stops waiting (a cancelled run), leave the request
     # thread to finish on its own instead of blocking until the API answers.
     pool = ThreadPoolExecutor(max_workers=1)
+    auth = {"X-API-Key": api_key} if api_key else {}
     try:
         request = pool.submit(
             session.post,
             api_url.rstrip("/") + endpoint,
             params={"rating_factors": "true"},
             data=gzip.compress(json.dumps(payload).encode()),
-            headers={"Content-Encoding": "gzip", "Content-Type": "application/json", "X-Run-ID": run_id}
-            | ({"X-API-Key": api_key} if api_key else {}),
+            headers={"Content-Encoding": "gzip", "Content-Type": "application/json", "X-Run-ID": run_id} | auth,
             timeout=TIMEOUT_S,
         )
-        while on_progress is not None and not wait([request], timeout=3).done:
-            on_progress(run_status(api_url, api_key, run_id))
-        resp = request.result()
+        try:
+            resp = await_response(request, api_url, api_key, run_id, on_progress)
+        except requests.ConnectionError:
+            # The connection dropped but the run carries on: rejoin it instead of failing
+            request = pool.submit(session.get, api_url.rstrip("/") + f"/runs/{run_id}", headers=auth, timeout=TIMEOUT_S)
+            resp = await_response(request, api_url, api_key, run_id, on_progress)
     finally:
         pool.shutdown(wait=False)
     if not resp.ok:
@@ -322,6 +325,35 @@ def run(
     with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
         tables = {Path(name).stem: pl.read_parquet(archive.read(name)) for name in archive.namelist()}
     return tables
+
+
+def fetch_run(api_url: str, api_key: str, run_id: str, on_progress=None) -> dict[str, pl.DataFrame]:
+    """Fetch an existing run without submitting it again."""
+    session = requests.Session()
+    session.max_redirects = MAX_REDIRECTS
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        request = pool.submit(
+            session.get,
+            api_url.rstrip("/") + f"/runs/{run_id}",
+            headers={"X-API-Key": api_key} if api_key else {},
+            timeout=TIMEOUT_S,
+        )
+        resp = await_response(request, api_url, api_key, run_id, on_progress)
+    finally:
+        pool.shutdown(wait=False)
+    if not resp.ok:
+        raise RuntimeError(_error_detail(resp))
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+        return {Path(name).stem: pl.read_parquet(archive.read(name)) for name in archive.namelist()}
+
+
+def await_response(request, api_url: str, api_key: str, run_id: str, on_progress):
+    """Wait for a pending request, passing the run's status to ``on_progress`` every few seconds."""
+    while on_progress is not None and not wait([request], timeout=3).done:
+        on_progress(run_status(api_url, api_key, run_id))
+    result = request.result()
+    return result
 
 
 def cancel_run(api_url: str, api_key: str, run_id: str) -> None:

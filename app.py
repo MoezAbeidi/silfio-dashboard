@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -83,35 +84,65 @@ def scenarios_file() -> Path:
 
 
 def cancel_run() -> None:
-    """Stop the run in progress; pressing the button also stops this session waiting for it."""
-    run_id = st.session_state.pop("active_run", None)
+    """Cancel explicitly; ordinary page reruns leave the background request alone."""
+    run_id = st.session_state.get("active_run")
     if run_id:
         sc.cancel_run(API_URL, API_KEY, run_id)
+        st.session_state.pop("active_run", None)
+        st.session_state.pop("run_future", None)
+        st.session_state.pop("run_context", None)
         st.session_state["run_cancelled"] = True
 
 
-def run_model(payload: dict) -> dict[str, pl.DataFrame]:
-    """Request fresh results only when a Run button is pressed, showing the run's progress."""
+def start_model(payload: dict, kind: str) -> None:
+    """Keep the request and its result alive independently of Streamlit script reruns."""
     run_id = uuid.uuid4().hex
-    st.session_state["active_run"] = run_id
-    bar = st.progress(0, text="Running Silfio…")
-    st.button("Cancel run", on_click=cancel_run)
+    st.session_state.active_run = run_id
+    st.session_state.run_context = (kind, hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
+    pool = ThreadPoolExecutor(max_workers=1)
+    st.session_state.run_future = pool.submit(sc.run, API_URL, API_KEY, payload, run_id=run_id)
+    pool.shutdown(wait=False)
 
-    def show(status):
-        # Always touch the page, so a Cancel press can interrupt the wait within seconds
-        if not status:
-            bar.progress(0, text="Running Silfio…")
-        elif status["status"] == "queued":
-            bar.progress(0, text=f"Queued behind {status['position'] or 0} other runs…")
-        elif status and status["progress"] == 0:
-            bar.progress(0, text="Preparing run: loading the portfolio and conflict simulations…")
-        elif status:
-            bar.progress(status["progress"], text=f"Running Silfio… {status['progress']}%")
 
-    result = sc.run(API_URL, API_KEY, payload, on_progress=show, run_id=run_id)
-    st.session_state.pop("active_run", None)
-    bar.empty()
-    return result
+@st.fragment(run_every=3)
+def track_model() -> None:
+    """Poll unobtrusively; publish completed results only against their original inputs."""
+    run_id = st.session_state.get("active_run")
+    future = st.session_state.get("run_future")
+    if not run_id or future is None:
+        return
+    kind, fingerprint = st.session_state.run_context
+    if future.done():
+        try:
+            result = future.result()
+        except Exception as error:  # noqa: BLE001 -- surface background failures in the page
+            st.session_state.run_error = f"Silfio could not run: {error}"
+            st.session_state.pop("active_run", None)
+            st.session_state.pop("run_future", None)
+            st.rerun()
+        assumptions = st.session_state.assumptions
+        payload = (
+            sc.build_payload(portfolio, programme=programme)
+            if kind == "Baseline"
+            else sc.build_payload(portfolio, assumptions["sites"], assumptions["countries"], programme=programme)
+        )
+        if hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest() != fingerprint:
+            st.caption(f"{kind} complete · return to the original portfolio and assumptions to view results.")
+            return
+        st.session_state[f"{kind.lower()}_results"] = result
+        st.session_state.view = kind
+        st.session_state.pop("active_run", None)
+        st.session_state.pop("run_future", None)
+        st.session_state.pop("run_error", None)
+        st.rerun()
+    status = sc.run_status(API_URL, API_KEY, run_id)
+    label = f"{kind} running…"
+    if status and status.get("status") == "queued":
+        label = f"{kind} queued · {status.get('position') or 0} ahead"
+    elif status and status.get("progress"):
+        label = f"{kind} running · {status['progress']}%"
+    st.caption(label)
+    st.button("Cancel", key="cancel_active_model", on_click=cancel_run, type="tertiary")
 
 
 @st.cache_data
@@ -889,7 +920,9 @@ with st.sidebar:
             st.caption("No policies: ground-up only")
         if programme_error:
             st.warning(f"Policies not used: {programme_error}")
-        baseline_requested = st.button("Run baseline", type="primary", width="stretch")
+        baseline_requested = st.button(
+            "Run baseline", type="primary", width="stretch", disabled=bool(st.session_state.get("active_run"))
+        )
         portfolio_upload()
     with tab_scenario:
         if st.button("Edit assumptions", width="stretch"):
@@ -905,7 +938,9 @@ with st.sidebar:
             st.session_state.pop("run_error", None)
             st.rerun()
 
-        scenario_requested = st.button("Run scenario", type="primary", width="stretch")
+        scenario_requested = st.button(
+            "Run scenario", type="primary", width="stretch", disabled=bool(st.session_state.get("active_run"))
+        )
         scenario_status = st.empty()
         with st.expander("Load an existing scenario"):
             try:
@@ -952,18 +987,20 @@ if baseline_requested or scenario_requested:
     else:
         try:
             if baseline_requested:
-                baseline = run_model(sc.build_payload(portfolio, programme=programme))
-                st.session_state.baseline_results = baseline
-                st.session_state.view = "Baseline"
+                payload = sc.build_payload(portfolio, programme=programme)
+                start_model(payload, "Baseline")
             if scenario_requested:
                 assumptions = st.session_state.assumptions
                 payload = sc.build_payload(
                     portfolio, assumptions["sites"], assumptions["countries"], programme=programme
                 )
-                st.session_state.scenario_results = run_model(payload)
-                st.session_state.view = "Scenario"
+                start_model(payload, "Scenario")
+            st.rerun()
         except Exception as error:  # noqa: BLE001 -- keep the UI available when a run fails
             st.session_state.run_error = f"Silfio could not run: {error}"
+
+with st.sidebar:
+    track_model()
 
 if "scenario_results" not in st.session_state:
     scenario_status.caption("Not run.")
