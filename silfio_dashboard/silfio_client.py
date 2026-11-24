@@ -6,6 +6,7 @@ import gzip
 import io
 import json
 import math
+import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -19,8 +20,10 @@ import pyarrow.parquet as pq
 import requests
 
 TIMEOUT_S = 3600
-# Long runs answer with a redirect every few minutes; allow runs of many hours.
-MAX_REDIRECTS = 500
+# Long runs answer with a redirect every 30 seconds; allow the API's 12-hour runs.
+MAX_REDIRECTS = 2000
+# Dropped connections to retry; resending the run ID rejoins the same run.
+MAX_RECONNECTS = 20
 
 
 def load_portfolio(path) -> pl.DataFrame:
@@ -303,21 +306,25 @@ def run(
     # thread to finish on its own instead of blocking until the API answers.
     pool = ThreadPoolExecutor(max_workers=1)
     auth = {"X-API-Key": api_key} if api_key else {}
+    body = gzip.compress(json.dumps(payload).encode())
     try:
-        request = pool.submit(
-            session.post,
-            api_url.rstrip("/") + endpoint,
-            params={"rating_factors": "true"},
-            data=gzip.compress(json.dumps(payload).encode()),
-            headers={"Content-Encoding": "gzip", "Content-Type": "application/json", "X-Run-ID": run_id} | auth,
-            timeout=TIMEOUT_S,
-        )
-        try:
-            resp = await_response(request, api_url, api_key, run_id, on_progress)
-        except requests.ConnectionError:
-            # The connection dropped but the run carries on: rejoin it instead of failing
-            request = pool.submit(session.get, api_url.rstrip("/") + f"/runs/{run_id}", headers=auth, timeout=TIMEOUT_S)
-            resp = await_response(request, api_url, api_key, run_id, on_progress)
+        for attempt in range(MAX_RECONNECTS):
+            request = pool.submit(
+                session.post,
+                api_url.rstrip("/") + endpoint,
+                params={"rating_factors": "true"},
+                data=body,
+                headers={"Content-Encoding": "gzip", "Content-Type": "application/json", "X-Run-ID": run_id} | auth,
+                timeout=TIMEOUT_S,
+            )
+            try:
+                resp = await_response(request, api_url, api_key, run_id, on_progress)
+                break
+            except requests.ConnectionError:
+                # The run carries on without us: resend to rejoin it, unless out of tries
+                if attempt + 1 == MAX_RECONNECTS:
+                    raise
+                time.sleep(min(30, 2**attempt))
     finally:
         pool.shutdown(wait=False)
     if not resp.ok:
